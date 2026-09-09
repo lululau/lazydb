@@ -636,6 +636,9 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | RelationInsertRow => 6,
         ExplorerSearchOpen | EditorDeleteWord | ResultsCopyRow | RelationVisualLine
         | RelationYankRow => 7,
+        // Footer visibility is gated per-context by `footer_rank`; the tiers for
+        // ResultsFilterCell/ResultsSortColumn only apply via footer_rank's
+        // `_ => footer_priority(id)` arm; the row! macros bake footer_priority into catalog rows.
         ResultsToggleView | ResultsFilterCell | ResultsSortColumn | RelationPaste
         | ExplorerRefresh | RelationBusyData => 8,
         DataQueryWhere | RelationWhere | RelationCommit => 9,

@@ -4361,7 +4361,7 @@ mod tests {
     }
 
     #[test]
-    fn results_sort_and_filter_keys_map_from_relation_data() {
+    fn results_sort_and_filter_keys_map_from_relation_and_sql_grids() {
         let mut app = App::new(Vec::new());
         let tab = RelationTab::new("users");
         app.tabs.push(WorkspaceTab::Relation(tab));
@@ -4369,6 +4369,20 @@ mod tests {
         app.focus = Focus::Results;
         let mut keymap = Keymap::default();
 
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE), &app),
+            Some(Action::CycleSelectedColumnSort)
+        );
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE), &app),
+            Some(Action::FilterGridCellByValue)
+        );
+
+        let mut console = crate::model::tab::ConsoleTab::new("console");
+        console.result_view = crate::model::tab::ResultView::Data;
+        console.query.capability = crate::model::data_query::DataQueryCapability::Sql;
+        app.tabs.push(WorkspaceTab::Sql(console));
+        app.active_tab = app.tabs.len() - 1;
         assert_eq!(
             keymap.map(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE), &app),
             Some(Action::CycleSelectedColumnSort)

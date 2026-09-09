@@ -389,19 +389,25 @@ the application mapper as contextual Help.
 | `0` / `^` | Select first column |
 | `$` | Select last column |
 | `/` / `s` | Focus WHERE/ORDER BY when Data Query is available |
+| `F` | Filter rows by the selected cell's value (`col = value`, `IS NULL` for NULL cells); replaces the WHERE input and reruns the derived query from page one |
+| `O` | Cycle the selected column's sort: `DESC`, `ASC`, unsorted; updates the ORDER BY input and reruns like a header click |
 
 When the Result set comes from a successful, read-only, single-query SQL
 execution that supports derived queries, clicking a column header uses the
-same cycle as Relation Data: `DESC`, `ASC`, and unsorted. A new key is appended
-after existing keys, and multi-key indicators show priority. The action updates
-the Result set's ORDER BY draft and reruns the derived query from page one;
-it does not sort only the rows currently visible in memory. The original SQL
-editor text is unchanged.
+same cycle as Relation Data: `DESC`, `ASC`, and unsorted. `O` triggers the
+same cycle for the cursor's column without reaching for the mouse. A new key
+is appended after existing keys, and multi-key indicators show priority. The
+action updates the Result set's ORDER BY draft and reruns the derived query
+from page one; it does not sort only the rows currently visible in memory.
+The original SQL editor text is unchanged.
 
 Header sorting is unavailable while a derived query is running or when the
 source query cannot be safely wrapped. Queries with duplicate output column
 names should use unique aliases before using this shortcut. A source query's
-own `LIMIT` or `TOP` remains part of the source result being sorted.
+own `LIMIT` or `TOP` remains part of the source result being sorted. As with
+the Relation Data preview, values containing `;`, `--`, `/*`, or `*/` are
+rejected by the derived query's safety guard and cannot be filtered until
+edited.
 
 ## SQL Output and Plan
 
@@ -432,13 +438,16 @@ In Relation Data, click a column header to cycle that column through `DESC`,
 `ASC`, and unsorted. A newly sorted column is appended after existing sort
 columns; the numbers shown with multiple sort indicators identify priority,
 with `1` applied first. The header action updates the `ORDER BY` input and
-submits the preview as if `Enter` were pressed.
+submits the preview as if `Enter` were pressed. `O` applies the same cycle to
+the cursor's column from the keyboard.
 
 Typing in WHERE or ORDER BY creates a draft. Draft text does not reload the
 preview until `Enter`; `Esc` restores the last submitted clauses. Invalid
 clauses remain visible as drafts with an error, while the last valid snapshot
 stays on screen. Header sorting is ignored while the current ORDER BY draft
-cannot be parsed.
+cannot be parsed. As with manually typed clauses, values containing `;`, `--`,
+`/*`, or `*/` are rejected by the preview's safety guard and cannot be
+filtered until edited.
 
 ### Browse
 
@@ -457,6 +466,8 @@ cannot be parsed.
 | `Ctrl-s` | Review relation changes before committing when editing is available |
 | `Ctrl-r` | Redo row changes when editing is available |
 | `/` / `s` | Focus WHERE/ORDER BY when query capability is available |
+| `F` | Filter rows by the selected cell's value (`col = value`, `IS NULL` for NULL cells); replaces the WHERE input and submits the preview |
+| `O` | Cycle the selected column's sort: `DESC`, `ASC`, unsorted; same as clicking the column header |
 | `r` | Refresh relation |
 
 The Relation Browse context uses `yy`/`yank row`, not SQL Results `y`/copy cell.
