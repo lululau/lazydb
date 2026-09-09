@@ -133,14 +133,18 @@ fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
 }
 
 #[test]
-fn mysql_catalog_requires_oracle_mysql_8_0_13() {
-    assert!(!mysql::supports_catalog_version("5.7.44"));
-    assert!(!mysql::supports_catalog_version("8.0.12"));
+fn mysql_catalog_accepts_mysql_5_6_and_mariadb_10_1() {
+    assert!(mysql::supports_catalog_version("5.6.16-log"));
+    assert!(mysql::supports_catalog_version("5.7.44"));
+    assert!(mysql::supports_catalog_version("8.0.12"));
     assert!(mysql::supports_catalog_version("8.0.13"));
     assert!(mysql::supports_catalog_version("8.4.1-commercial"));
-    assert!(!mysql::supports_catalog_version("10.1.48-MariaDB"));
-    assert!(!mysql::supports_catalog_version("10.11.8-MariaDB"));
-    assert!(!mysql::supports_catalog_version("5.5.5-10.11.8-MariaDB"));
+    assert!(mysql::supports_catalog_version("10.1.48-MariaDB"));
+    assert!(mysql::supports_catalog_version("10.11.8-MariaDB"));
+    assert!(mysql::supports_catalog_version("5.5.5-10.11.8-MariaDB"));
+    assert!(!mysql::supports_catalog_version("5.5.62"));
+    assert!(!mysql::supports_catalog_version("10.0.38-MariaDB"));
+    assert!(!mysql::supports_catalog_version("nope"));
 }
 
 #[test]

@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+use super::mysql_version::{MySqlCatalogCapabilities, MySqlServerInfo};
 use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
@@ -78,7 +79,8 @@ ORDER BY BINARY index_name, seq_in_index
 
 const PROBE_SQL: &str = "SELECT VERSION() AS version, DATABASE() AS current_database";
 
-pub const CATALOG_PAGE_BEGIN_SQL: &str = "START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY";
+pub const CATALOG_PAGE_BEGIN_SQL: &str =
+    crate::db::mysql_version::CATALOG_BEGIN_SNAPSHOT_READ_ONLY;
 
 pub const CATALOG_SEARCH_CANDIDATES_SQL: &str = r#"
 WITH candidates AS (
@@ -585,11 +587,9 @@ impl MySqlAdapter {
             .fetch_one(&mut *connection)
             .await
             .map_err(sql_error)?;
-        if !supports_catalog_version(&version) {
-            return Err(unsupported_catalog_version(&version));
-        }
+        let capabilities = catalog_capabilities(&version)?;
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(capabilities.catalog_begin_sql)
             .await
             .map_err(sql_error)?;
         let lower_case_table_names: i64 =
@@ -670,11 +670,9 @@ impl MySqlAdapter {
             .fetch_one(&mut *connection)
             .await
             .map_err(sql_error)?;
-        if !supports_catalog_version(&version) {
-            return Err(unsupported_catalog_version(&version));
-        }
+        let capabilities = catalog_capabilities(&version)?;
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(capabilities.catalog_begin_sql)
             .await
             .map_err(sql_error)?;
         let lower_case_table_names: i64 =
@@ -1708,8 +1706,13 @@ impl MySqlAdapter {
     pub async fn relation_ddl(&self, relation: &CatalogId) -> Result<RelationDdl, DatabaseError> {
         validate_catalog_scope(&self.catalog_scope)?;
         let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        let version: String = sqlx::query_scalar("SELECT VERSION()")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(sql_error)?;
+        let capabilities = catalog_capabilities(&version)?;
         let mut transaction = connection
-            .begin_with(CATALOG_PAGE_BEGIN_SQL)
+            .begin_with(capabilities.catalog_begin_sql)
             .await
             .map_err(sql_error)?;
         let result = self.relation_ddl_snapshot(&mut transaction, relation).await;
@@ -3103,10 +3106,7 @@ fn bind_cell<'q>(
 }
 
 pub fn supports_catalog_version(version: &str) -> bool {
-    if version.to_ascii_lowercase().contains("mariadb") {
-        return false;
-    }
-    parse_version_triplet(version).is_some_and(|version| version >= (8, 0, 13))
+    MySqlServerInfo::parse(version).is_some_and(|info| info.supports_catalog())
 }
 
 fn unsupported_catalog_version(version: &str) -> DatabaseError {
@@ -3114,23 +3114,18 @@ fn unsupported_catalog_version(version: &str) -> DatabaseError {
         category: ErrorCategory::Unsupported,
         code: Some("mysql_catalog_version_unsupported".to_owned()),
         message: sanitize_terminal_text(&format!(
-            "MySQL catalog pages require Oracle MySQL 8.0.13 or newer; server reported {version}"
+            "MySQL catalog requires Oracle MySQL 5.6+ or MariaDB 10.1+; server reported {version}"
         )),
         diagnostic: None,
     }
 }
 
-fn parse_version_triplet(version: &str) -> Option<(u32, u32, u32)> {
-    let mut parts = version.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts
-        .next()?
-        .split(|character: char| !character.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()?;
-    Some((major, minor, patch))
+fn catalog_capabilities(version: &str) -> Result<MySqlCatalogCapabilities, DatabaseError> {
+    let info = MySqlServerInfo::parse(version).ok_or_else(|| unsupported_catalog_version(version))?;
+    if !info.supports_catalog() {
+        return Err(unsupported_catalog_version(version));
+    }
+    Ok(MySqlCatalogCapabilities::for_server(&info))
 }
 
 pub fn quote_identifier(value: &str) -> String {
