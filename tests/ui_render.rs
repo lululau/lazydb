@@ -3873,7 +3873,10 @@ fn explorer_search_status_hint_names_editing_controls() {
     app.update(Action::ExplorerSearchInsert('u'));
     let output = render(&app, 180, 36);
 
-    assert!(output.contains("0 results  ↑/↓ select  Ctrl+N/P match"), "{output}");
+    assert!(
+        output.contains("0 results  ↑/↓ select  Ctrl+N/P match"),
+        "{output}"
+    );
     assert!(!output.contains("n/N next/prev"), "{output}");
 }
 

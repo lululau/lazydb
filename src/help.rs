@@ -3406,6 +3406,14 @@ mod tests {
                 "empty {context:?}"
             );
         }
+        // Pin the invariant the skips above rely on: Confirmed is intentionally rowless.
+        assert!(
+            shortcuts(
+                ShortcutContext::ExplorerCatalogSearchConfirmed,
+                ShortcutCapabilities::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]

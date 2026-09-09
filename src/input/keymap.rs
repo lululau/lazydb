@@ -3803,10 +3803,7 @@ mod tests {
             Some(Action::ExplorerSearchInsert('n'))
         );
         assert_eq!(
-            keymap.map(
-                KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
-                &app
-            ),
+            keymap.map(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT), &app),
             Some(Action::ExplorerSearchInsert('N'))
         );
         assert_eq!(
