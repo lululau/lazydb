@@ -133,7 +133,7 @@ fn mysql_column_sql_omits_generation_expression_when_unavailable() {
 
 #[test]
 fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
-    let sql = mysql::CATALOG_SEARCH_CANDIDATES_SQL;
+    let sql = mysql::catalog_search_candidates_sql(true, true);
     assert!(sql.contains("information_schema.schemata"));
     assert!(sql.contains("information_schema.tables"));
     assert!(sql.contains("information_schema.routines"));
@@ -151,6 +151,19 @@ fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
     for unsupported in ["materialized", "sequence", "check_constraint", "type'"] {
         assert!(!sql.to_ascii_lowercase().contains(unsupported));
     }
+}
+
+#[test]
+fn mysql_search_sql_has_modern_and_legacy_shapes() {
+    let modern = mysql::catalog_search_candidates_sql(true, true);
+    assert!(modern.contains("WITH candidates AS"));
+    assert!(modern.contains("REGEXP_REPLACE"));
+
+    let legacy = mysql::catalog_search_candidates_sql(false, false);
+    assert!(!legacy.contains("WITH candidates AS"));
+    assert!(!legacy.contains("REGEXP_REPLACE"));
+    assert!(legacy.contains("UNION ALL"));
+    assert!(legacy.contains("{scope_predicate}"));
 }
 
 #[test]

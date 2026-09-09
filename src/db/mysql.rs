@@ -24,7 +24,9 @@ use crate::{
     },
 };
 
-use super::mysql_version::{MySqlCatalogCapabilities, MySqlServerInfo};
+use super::mysql_version::{
+    normalize_search_token, MySqlCatalogCapabilities, MySqlServerInfo,
+};
 use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
@@ -178,6 +180,77 @@ ORDER BY CASE
 LIMIT 101
 "#;
 
+pub const CATALOG_SEARCH_CANDIDATES_LEGACY_SQL: &str = r#"
+SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
+FROM (
+    SELECT 'database' AS kind, schema_name AS database_name, schema_name AS object_name,
+           NULL AS relation_name, NULL AS relation_type, schema_name AS native_identity,
+           schema_name AS qualified_path, NULL AS comment
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT 'schema', schema_name, schema_name, NULL, NULL, schema_name, schema_name, NULL
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT IF(table_type='VIEW','view','table'), table_schema, table_name, table_name, table_type,
+           table_name, CONCAT(table_schema,'.',table_name), table_comment
+    FROM information_schema.tables WHERE table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT LOWER(routine_type), routine_schema, routine_name, NULL, NULL, specific_name,
+           CONCAT(routine_schema,'.',routine_name), routine_comment
+    FROM information_schema.routines WHERE routine_type IN ('FUNCTION','PROCEDURE')
+    UNION ALL
+    SELECT 'trigger', tr.trigger_schema, tr.trigger_name, tr.event_object_table, t.table_type,
+           tr.trigger_name, CONCAT(tr.trigger_schema,'.',tr.event_object_table,'.',tr.trigger_name), NULL
+    FROM information_schema.triggers tr JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tr.event_object_schema
+     AND BINARY t.table_name=BINARY tr.event_object_table
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'column', c.table_schema, c.column_name, c.table_name, t.table_type,
+           CAST(c.ordinal_position AS CHAR), CONCAT(c.table_schema,'.',c.table_name,'.',c.column_name), NULL
+    FROM information_schema.columns c JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY c.table_schema AND BINARY t.table_name=BINARY c.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'index', s.table_schema, s.index_name, s.table_name, t.table_type, s.index_name,
+           CONCAT(s.table_schema,'.',s.table_name,'.',s.index_name), NULL
+    FROM information_schema.statistics s JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY s.table_schema AND BINARY t.table_name=BINARY s.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    GROUP BY s.table_schema, s.table_name, s.index_name, t.table_type
+    UNION ALL
+    SELECT CASE constraint_type WHEN 'PRIMARY KEY' THEN 'primary_key'
+               WHEN 'UNIQUE' THEN 'unique_constraint' ELSE 'foreign_key' END,
+           tc.table_schema, tc.constraint_name, tc.table_name, t.table_type, tc.constraint_name,
+           CONCAT(tc.table_schema,'.',tc.table_name,'.',tc.constraint_name), NULL
+    FROM information_schema.table_constraints tc JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tc.table_schema AND BINARY t.table_name=BINARY tc.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    WHERE tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+) AS candidates
+WHERE {scope_predicate}
+  AND database_name NOT IN ('information_schema','mysql','performance_schema','sys')
+  AND (
+        LOCATE(?, LOWER(object_name)) > 0
+     OR LOCATE(?, LOWER(IFNULL(qualified_path, ''))) > 0
+      )
+ORDER BY LOWER(IFNULL(qualified_path, object_name)), kind, BINARY native_identity
+LIMIT 101
+"#;
+
+pub const fn catalog_search_candidates_sql(
+    search_cte: bool,
+    regexp_replace: bool,
+) -> &'static str {
+    if search_cte && regexp_replace {
+        CATALOG_SEARCH_CANDIDATES_SQL
+    } else {
+        CATALOG_SEARCH_CANDIDATES_LEGACY_SQL
+    }
+}
+
 pub const CATALOG_DATABASES_SQL: &str = r#"
 SELECT schema_name
 FROM information_schema.schemata
@@ -238,6 +311,86 @@ impl MySqlSearchCandidate {
         }
         CatalogId::new(connection_id, self.kind, path)
     }
+}
+
+fn candidate_search_haystacks(candidate: &MySqlSearchCandidate) -> [String; 2] {
+    let name = candidate.name.to_ascii_lowercase();
+    let path = match candidate.kind {
+        CatalogKind::Database | CatalogKind::Schema => candidate.database.to_ascii_lowercase(),
+        _ => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
+    };
+    [name, path]
+}
+
+fn legacy_search_rank(candidate: &MySqlSearchCandidate, needle: &str) -> Option<u8> {
+    let [name, path] = candidate_search_haystacks(candidate);
+    let name = normalize_search_token(&name);
+    let path = normalize_search_token(&path);
+    if name == needle {
+        Some(0)
+    } else if name.starts_with(needle) {
+        Some(1)
+    } else if name.contains(needle) {
+        Some(2)
+    } else if path.contains(needle) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+fn search_kind_sort_key(kind: CatalogKind) -> &'static str {
+    match kind {
+        CatalogKind::Database => "database",
+        CatalogKind::Schema => "schema",
+        CatalogKind::Table => "table",
+        CatalogKind::View => "view",
+        CatalogKind::Function => "function",
+        CatalogKind::Procedure => "procedure",
+        CatalogKind::Trigger => "trigger",
+        CatalogKind::Column => "column",
+        CatalogKind::Index => "index",
+        CatalogKind::PrimaryKey => "primary_key",
+        CatalogKind::UniqueConstraint => "unique_constraint",
+        CatalogKind::ForeignKey => "foreign_key",
+        CatalogKind::MaterializedView
+        | CatalogKind::CheckConstraint
+        | CatalogKind::Sequence
+        | CatalogKind::Type => "object",
+    }
+}
+
+fn rank_legacy_search_candidates(
+    candidates: Vec<MySqlSearchCandidate>,
+    needle: &str,
+) -> Vec<MySqlSearchCandidate> {
+    let needle = normalize_search_token(needle);
+    if needle.is_empty() {
+        return candidates.into_iter().take(101).collect();
+    }
+    let mut ranked = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            legacy_search_rank(&candidate, &needle).map(|rank| (rank, candidate))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_rank, left), (right_rank, right)| {
+        left_rank.cmp(right_rank).then_with(|| {
+            let left_path = candidate_search_haystacks(left)[1].clone();
+            let right_path = candidate_search_haystacks(right)[1].clone();
+            left_path
+                .cmp(&right_path)
+                .then_with(|| {
+                    search_kind_sort_key(left.kind).cmp(search_kind_sort_key(right.kind))
+                })
+                .then_with(|| left.native_identity.cmp(&right.native_identity))
+        })
+    });
+    ranked
+        .into_iter()
+        .take(101)
+        .map(|(_, candidate)| candidate)
+        .collect()
 }
 
 impl MySqlAdapter {
@@ -750,23 +903,41 @@ impl MySqlAdapter {
                 }
             })
             .unwrap_or_else(|| "TRUE".to_owned());
-        let sql = CATALOG_SEARCH_CANDIDATES_SQL.replace("{scope_predicate}", &scope_predicate);
+        let use_modern = capabilities.search_cte && capabilities.regexp_replace;
+        let sql = catalog_search_candidates_sql(
+            capabilities.search_cte,
+            capabilities.regexp_replace,
+        )
+        .replace("{scope_predicate}", &scope_predicate);
         let mut query = sqlx::query(AssertSqlSafe(sql));
         let (search_query, ignore_separators) = crate::db::catalog::search_query(&request.query);
-        query = query.bind(ignore_separators).bind(ignore_separators);
-        if let Some(databases) = selected.as_ref() {
-            for database in databases {
-                query = query.bind(database);
+        if use_modern {
+            query = query.bind(ignore_separators).bind(ignore_separators);
+            if let Some(databases) = selected.as_ref() {
+                for database in databases {
+                    query = query.bind(database);
+                }
             }
-        }
-        for _ in 0..5 {
-            query = query.bind(&search_query);
+            for _ in 0..5 {
+                query = query.bind(&search_query);
+            }
+        } else {
+            if let Some(databases) = selected.as_ref() {
+                for database in databases {
+                    query = query.bind(database);
+                }
+            }
+            let needle = search_query.to_ascii_lowercase();
+            query = query.bind(needle.clone()).bind(needle);
         }
         let rows = query.fetch_all(&mut *connection).await.map_err(sql_error)?;
-        let candidates = rows
+        let mut candidates = rows
             .into_iter()
             .map(MySqlSearchCandidate::try_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        if !use_modern && ignore_separators {
+            candidates = rank_legacy_search_candidates(candidates, &search_query);
+        }
 
         let mut relation_cache = HashMap::<(String, String), MySqlHydratedRelation>::new();
         for candidate in &candidates {
