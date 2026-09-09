@@ -70,12 +70,21 @@ WHERE table_schema = ?
 ORDER BY table_name, index_name, seq_in_index
 "#;
 
-pub const CATALOG_PAGE_INDEXES_SQL: &str = r#"
-SELECT index_name, non_unique, seq_in_index, column_name, expression
+pub const fn catalog_page_indexes_sql(statistics_expression: bool) -> &'static str {
+    if statistics_expression {
+        r#"SELECT index_name, non_unique, seq_in_index, column_name, expression
 FROM information_schema.statistics
 WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ?
-ORDER BY BINARY index_name, seq_in_index
-"#;
+ORDER BY BINARY index_name, seq_in_index"#
+    } else {
+        r#"SELECT index_name, non_unique, seq_in_index, column_name
+FROM information_schema.statistics
+WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ?
+ORDER BY BINARY index_name, seq_in_index"#
+    }
+}
+
+pub const CATALOG_PAGE_INDEXES_SQL: &str = catalog_page_indexes_sql(true);
 
 const PROBE_SQL: &str = "SELECT VERSION() AS version, DATABASE() AS current_database";
 
@@ -632,6 +641,7 @@ impl MySqlAdapter {
                     request,
                     relation,
                     lower_case_table_names,
+                    &capabilities,
                 )
                 .await
             }
@@ -690,7 +700,7 @@ impl MySqlAdapter {
             )));
         }
         let result = self
-            .search_catalog_snapshot(&mut transaction, request)
+            .search_catalog_snapshot(&mut transaction, request, &capabilities)
             .await;
         match result {
             Ok(page) => {
@@ -708,6 +718,7 @@ impl MySqlAdapter {
         &self,
         connection: &mut MySqlConnection,
         request: &CatalogSearchRequest,
+        capabilities: &MySqlCatalogCapabilities,
     ) -> Result<CatalogSearchPage, DatabaseError> {
         let selected = selected_search_databases(&request.scope);
         let scope_predicate = selected
@@ -759,6 +770,7 @@ impl MySqlAdapter {
                             &candidate.database,
                             relation_name,
                             &relation.entry.id,
+                            capabilities,
                         )
                         .await?;
                     relation_cache
@@ -781,6 +793,7 @@ impl MySqlAdapter {
                         &candidate.database,
                         relation_name,
                         &relation.id,
+                        capabilities,
                     )
                     .await?,
                 )
@@ -1293,6 +1306,7 @@ impl MySqlAdapter {
         request: &CatalogRequest,
         relation: &CatalogId,
         lower_case_table_names: i64,
+        capabilities: &MySqlCatalogCapabilities,
     ) -> Result<CatalogPage, DatabaseError> {
         let (database, relation_name, _) = self
             .verify_relation(
@@ -1303,7 +1317,13 @@ impl MySqlAdapter {
             )
             .await?;
         let mut entries = self
-            .load_relation_children(connection, &database, &relation_name, relation)
+            .load_relation_children(
+                connection,
+                &database,
+                &relation_name,
+                relation,
+                capabilities,
+            )
             .await?;
         let total_count = exact_count(entries.len())?;
         let next_cursor =
@@ -1317,9 +1337,10 @@ impl MySqlAdapter {
         database: &str,
         relation_name: &str,
         relation: &CatalogId,
+        capabilities: &MySqlCatalogCapabilities,
     ) -> Result<Vec<CatalogEntry>, DatabaseError> {
         let indexes = self
-            .load_index_metadata(connection, database, relation_name)
+            .load_index_metadata(connection, database, relation_name, capabilities)
             .await?;
         let constraints = self
             .load_constraint_metadata(connection, database, relation_name)
@@ -1715,7 +1736,9 @@ impl MySqlAdapter {
             .begin_with(capabilities.catalog_begin_sql)
             .await
             .map_err(sql_error)?;
-        let result = self.relation_ddl_snapshot(&mut transaction, relation).await;
+        let result = self
+            .relation_ddl_snapshot(&mut transaction, relation, &capabilities)
+            .await;
         match result {
             Ok(ddl) => {
                 transaction.commit().await.map_err(sql_error)?;
@@ -1732,6 +1755,7 @@ impl MySqlAdapter {
         &self,
         connection: &mut MySqlConnection,
         relation: &CatalogId,
+        capabilities: &MySqlCatalogCapabilities,
     ) -> Result<RelationDdl, DatabaseError> {
         let target = CatalogTarget::RelationChildren {
             relation: relation.clone(),
@@ -1792,7 +1816,7 @@ impl MySqlAdapter {
             page_size: RELATION_PREVIEW_LIMIT,
         };
         let mut children_entries = self
-            .load_relation_children(connection, &database, &name, relation)
+            .load_relation_children(connection, &database, &name, relation, capabilities)
             .await?;
         let _ = paginate_in_memory(
             &mut children_entries,
@@ -1847,13 +1871,16 @@ impl MySqlAdapter {
         connection: &mut MySqlConnection,
         database: &str,
         relation: &str,
+        capabilities: &MySqlCatalogCapabilities,
     ) -> Result<Vec<MySqlIndexInfo>, DatabaseError> {
-        let rows = sqlx::query(CATALOG_PAGE_INDEXES_SQL)
-            .bind(database)
-            .bind(relation)
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(sql_error)?;
+        let rows = sqlx::query(catalog_page_indexes_sql(
+            capabilities.statistics_expression,
+        ))
+        .bind(database)
+        .bind(relation)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
         let parts = rows
             .into_iter()
             .map(|row| {
@@ -1865,7 +1892,11 @@ impl MySqlAdapter {
                         "index ordinal",
                     )?,
                     column: row.try_get(3).map_err(decode_error)?,
-                    expression: row.try_get(4).map_err(decode_error)?,
+                    expression: if capabilities.statistics_expression {
+                        row.try_get(4).map_err(decode_error)?
+                    } else {
+                        None
+                    },
                 })
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;

@@ -111,6 +111,16 @@ fn quotes_mysql_identifiers_and_uses_information_schema() {
 }
 
 #[test]
+fn mysql_index_sql_omits_expression_without_capability() {
+    let legacy = mysql::catalog_page_indexes_sql(false);
+    assert!(legacy.contains("column_name"));
+    assert!(!legacy.to_ascii_lowercase().contains("expression"));
+
+    let modern = mysql::catalog_page_indexes_sql(true);
+    assert!(modern.to_ascii_lowercase().contains("expression"));
+}
+
+#[test]
 fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
     let sql = mysql::CATALOG_SEARCH_CANDIDATES_SQL;
     assert!(sql.contains("information_schema.schemata"));
