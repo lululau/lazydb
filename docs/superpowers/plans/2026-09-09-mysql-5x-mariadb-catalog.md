@@ -560,11 +560,11 @@ git commit -m "feat(mysql): load column metadata without generation_expression o
 ```rust
 #[test]
 fn mysql_search_sql_has_modern_and_legacy_shapes() {
-    let modern = mysql::catalog_search_candidates_sql(true, true);
+    let modern = mysql::catalog_search_candidates_sql(true, true, true);
     assert!(modern.contains("WITH candidates AS"));
     assert!(modern.contains("REGEXP_REPLACE"));
 
-    let legacy = mysql::catalog_search_candidates_sql(false, false);
+    let legacy = mysql::catalog_search_candidates_sql(false, false, false);
     assert!(!legacy.contains("WITH candidates AS"));
     assert!(!legacy.contains("REGEXP_REPLACE"));
     assert!(legacy.contains("UNION ALL"));
@@ -576,11 +576,15 @@ fn mysql_search_sql_has_modern_and_legacy_shapes() {
 
 - [ ] **Step 3: Implement legacy search SQL + optional Rust normalize**
 
-Provide `catalog_search_candidates_sql(search_cte: bool, regexp_replace: bool) -> String` (or two static templates):
+Provide `catalog_search_candidates_sql(search_cte: bool, regexp_replace: bool, ignore_separators: bool) -> &'static str` (modern vs legacy-locate vs legacy-scope templates):
 
 **Modern:** keep current `CATALOG_SEARCH_CANDIDATES_SQL` (CTE + `REGEXP_REPLACE`).
 
-**Legacy (no CTE, no `REGEXP_REPLACE`):** wrap the same `UNION ALL` arms in a derived table:
+**Legacy (no CTE, no `REGEXP_REPLACE`):** wrap the same `UNION ALL` arms in a derived table.
+
+When `ignore_separators` is true, legacy search must **scope-filter in SQL and match in Rust** — do **not** `LOCATE` a normalized needle against raw names (that drops matches like needle `foobar` vs name `foo_bar`). Use scope-only SQL (no text `LOCATE`), fetch in-scope candidates (higher `LIMIT`, e.g. 5000), then filter+rank in Rust with `catalog::normalize_search_text` / haystacks. Cap at 101 after filter.
+
+When `ignore_separators` is false (empty normalized query edge case), `LOCATE` on lowercase raw needle against `LOWER(name/path)` is OK:
 
 ```sql
 SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
@@ -599,19 +603,24 @@ LIMIT 101
 
 In `search_catalog_snapshot`:
 
-1. Build SQL from capabilities (`search_cte` / `regexp_replace`).
+1. Build SQL from capabilities (`search_cte` / `regexp_replace`) and `ignore_separators`.
 2. If modern: keep existing bind pattern (`ignore_separators` twice + scope + five search binds).
 3. If legacy:
    - Bind scope databases as today.
-   - Bind `search_query.to_ascii_lowercase()` twice for the two `LOCATE` predicates.
-   - If `ignore_separators` is true, after fetch filter/rank in Rust using `mysql_version::normalize_search_token` on `object_name` / qualified path and the needle (same ranking intent: exact normalized → prefix → contains). Cap at 101 after filter.
-4. Ensure `qualified_path` remains selected inside the legacy subquery even if not returned, **or** return it and extend `MySqlSearchCandidate` — simplest path: include `qualified_path` in the legacy SELECT list only for filtering, or recompute `CONCAT` in Rust from fields already on the candidate. Prefer filtering with `database`, `name`, and optional relation fields already on `MySqlSearchCandidate` to avoid struct churn:
+   - If `!ignore_separators`: bind `search_query.to_ascii_lowercase()` twice for the two `LOCATE` predicates.
+   - If `ignore_separators`: no text binds; after fetch filter/rank in Rust (exact normalized → prefix → contains). Cap at 101 after filter.
+4. Recompute search haystacks in Rust from fields already on `MySqlSearchCandidate`. Include `relation_name` when present for relation children (`db.relation.name`), matching modern `qualified_path` shape:
 
 ```rust
 fn candidate_search_haystacks(candidate: &MySqlSearchCandidate) -> [String; 2] {
     let name = candidate.name.to_ascii_lowercase();
     let path = match candidate.kind {
         CatalogKind::Database | CatalogKind::Schema => candidate.database.to_ascii_lowercase(),
+        _ if candidate.kind.is_relation_child() => match &candidate.relation_name {
+            Some(relation) => format!("{}.{}.{}", candidate.database, relation, candidate.name)
+                .to_ascii_lowercase(),
+            None => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
+        },
         _ => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
     };
     [name, path]

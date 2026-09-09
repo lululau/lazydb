@@ -133,7 +133,7 @@ fn mysql_column_sql_omits_generation_expression_when_unavailable() {
 
 #[test]
 fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
-    let sql = mysql::catalog_search_candidates_sql(true, true);
+    let sql = mysql::catalog_search_candidates_sql(true, true, true);
     assert!(sql.contains("information_schema.schemata"));
     assert!(sql.contains("information_schema.tables"));
     assert!(sql.contains("information_schema.routines"));
@@ -155,15 +155,24 @@ fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
 
 #[test]
 fn mysql_search_sql_has_modern_and_legacy_shapes() {
-    let modern = mysql::catalog_search_candidates_sql(true, true);
+    let modern = mysql::catalog_search_candidates_sql(true, true, true);
     assert!(modern.contains("WITH candidates AS"));
     assert!(modern.contains("REGEXP_REPLACE"));
 
-    let legacy = mysql::catalog_search_candidates_sql(false, false);
-    assert!(!legacy.contains("WITH candidates AS"));
-    assert!(!legacy.contains("REGEXP_REPLACE"));
-    assert!(legacy.contains("UNION ALL"));
-    assert!(legacy.contains("{scope_predicate}"));
+    let legacy_locate = mysql::catalog_search_candidates_sql(false, false, false);
+    assert!(!legacy_locate.contains("WITH candidates AS"));
+    assert!(!legacy_locate.contains("REGEXP_REPLACE"));
+    assert!(legacy_locate.contains("UNION ALL"));
+    assert!(legacy_locate.contains("{scope_predicate}"));
+    assert!(legacy_locate.contains("LOCATE(?, LOWER(object_name))"));
+
+    // When ignore_separators, legacy must not LOCATE a normalized needle against raw names.
+    let legacy_scope = mysql::catalog_search_candidates_sql(false, false, true);
+    assert!(!legacy_scope.contains("WITH candidates AS"));
+    assert!(!legacy_scope.contains("REGEXP_REPLACE"));
+    assert!(!legacy_scope.contains("LOCATE("));
+    assert!(legacy_scope.contains("{scope_predicate}"));
+    assert!(legacy_scope.contains("LIMIT 5000"));
 }
 
 #[test]

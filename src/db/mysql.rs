@@ -24,9 +24,7 @@ use crate::{
     },
 };
 
-use super::mysql_version::{
-    normalize_search_token, MySqlCatalogCapabilities, MySqlServerInfo,
-};
+use super::mysql_version::{MySqlCatalogCapabilities, MySqlServerInfo};
 use super::transaction::{TransactionBackend, TransactionError};
 use super::{
     DatabaseError, ErrorCategory, ServerInfo,
@@ -240,12 +238,78 @@ ORDER BY LOWER(IFNULL(qualified_path, object_name)), kind, BINARY native_identit
 LIMIT 101
 "#;
 
+/// Legacy search without SQL text prefilter. Used when `ignore_separators` is true so
+/// separator-insensitive matching can happen in Rust (LOCATE on a normalized needle
+/// against raw names would drop matches like `foobar` vs `foo_bar`).
+pub const CATALOG_SEARCH_CANDIDATES_LEGACY_SCOPE_SQL: &str = r#"
+SELECT kind, database_name, object_name, relation_name, relation_type, native_identity, comment
+FROM (
+    SELECT 'database' AS kind, schema_name AS database_name, schema_name AS object_name,
+           NULL AS relation_name, NULL AS relation_type, schema_name AS native_identity,
+           schema_name AS qualified_path, NULL AS comment
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT 'schema', schema_name, schema_name, NULL, NULL, schema_name, schema_name, NULL
+    FROM information_schema.schemata
+    WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')
+    UNION ALL
+    SELECT IF(table_type='VIEW','view','table'), table_schema, table_name, table_name, table_type,
+           table_name, CONCAT(table_schema,'.',table_name), table_comment
+    FROM information_schema.tables WHERE table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT LOWER(routine_type), routine_schema, routine_name, NULL, NULL, specific_name,
+           CONCAT(routine_schema,'.',routine_name), routine_comment
+    FROM information_schema.routines WHERE routine_type IN ('FUNCTION','PROCEDURE')
+    UNION ALL
+    SELECT 'trigger', tr.trigger_schema, tr.trigger_name, tr.event_object_table, t.table_type,
+           tr.trigger_name, CONCAT(tr.trigger_schema,'.',tr.event_object_table,'.',tr.trigger_name), NULL
+    FROM information_schema.triggers tr JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tr.event_object_schema
+     AND BINARY t.table_name=BINARY tr.event_object_table
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'column', c.table_schema, c.column_name, c.table_name, t.table_type,
+           CAST(c.ordinal_position AS CHAR), CONCAT(c.table_schema,'.',c.table_name,'.',c.column_name), NULL
+    FROM information_schema.columns c JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY c.table_schema AND BINARY t.table_name=BINARY c.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    UNION ALL
+    SELECT 'index', s.table_schema, s.index_name, s.table_name, t.table_type, s.index_name,
+           CONCAT(s.table_schema,'.',s.table_name,'.',s.index_name), NULL
+    FROM information_schema.statistics s JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY s.table_schema AND BINARY t.table_name=BINARY s.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    GROUP BY s.table_schema, s.table_name, s.index_name, t.table_type
+    UNION ALL
+    SELECT CASE constraint_type WHEN 'PRIMARY KEY' THEN 'primary_key'
+               WHEN 'UNIQUE' THEN 'unique_constraint' ELSE 'foreign_key' END,
+           tc.table_schema, tc.constraint_name, tc.table_name, t.table_type, tc.constraint_name,
+           CONCAT(tc.table_schema,'.',tc.table_name,'.',tc.constraint_name), NULL
+    FROM information_schema.table_constraints tc JOIN information_schema.tables t
+      ON BINARY t.table_schema=BINARY tc.table_schema AND BINARY t.table_name=BINARY tc.table_name
+     AND t.table_type IN ('BASE TABLE','VIEW')
+    WHERE tc.constraint_type IN ('PRIMARY KEY','UNIQUE','FOREIGN KEY')
+) AS candidates
+WHERE {scope_predicate}
+  AND database_name NOT IN ('information_schema','mysql','performance_schema','sys')
+ORDER BY LOWER(IFNULL(qualified_path, object_name)), kind, BINARY native_identity
+LIMIT 5000
+"#;
+
+/// Select catalog search SQL for the capability matrix.
+///
+/// `ignore_separators` only affects the legacy shape: when true, SQL is scope-only
+/// (no `LOCATE` text prefilter) and Rust ranks with normalized tokens.
 pub const fn catalog_search_candidates_sql(
     search_cte: bool,
     regexp_replace: bool,
+    ignore_separators: bool,
 ) -> &'static str {
     if search_cte && regexp_replace {
         CATALOG_SEARCH_CANDIDATES_SQL
+    } else if ignore_separators {
+        CATALOG_SEARCH_CANDIDATES_LEGACY_SCOPE_SQL
     } else {
         CATALOG_SEARCH_CANDIDATES_LEGACY_SQL
     }
@@ -317,6 +381,14 @@ fn candidate_search_haystacks(candidate: &MySqlSearchCandidate) -> [String; 2] {
     let name = candidate.name.to_ascii_lowercase();
     let path = match candidate.kind {
         CatalogKind::Database | CatalogKind::Schema => candidate.database.to_ascii_lowercase(),
+        _ if candidate.kind.is_relation_child() => match &candidate.relation_name {
+            Some(relation) => format!(
+                "{}.{}.{}",
+                candidate.database, relation, candidate.name
+            )
+            .to_ascii_lowercase(),
+            None => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
+        },
         _ => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
     };
     [name, path]
@@ -324,8 +396,8 @@ fn candidate_search_haystacks(candidate: &MySqlSearchCandidate) -> [String; 2] {
 
 fn legacy_search_rank(candidate: &MySqlSearchCandidate, needle: &str) -> Option<u8> {
     let [name, path] = candidate_search_haystacks(candidate);
-    let name = normalize_search_token(&name);
-    let path = normalize_search_token(&path);
+    let name = super::catalog::normalize_search_text(&name);
+    let path = super::catalog::normalize_search_text(&path);
     if name == needle {
         Some(0)
     } else if name.starts_with(needle) {
@@ -364,7 +436,7 @@ fn rank_legacy_search_candidates(
     candidates: Vec<MySqlSearchCandidate>,
     needle: &str,
 ) -> Vec<MySqlSearchCandidate> {
-    let needle = normalize_search_token(needle);
+    let needle = super::catalog::normalize_search_text(needle);
     if needle.is_empty() {
         return candidates.into_iter().take(101).collect();
     }
@@ -904,13 +976,14 @@ impl MySqlAdapter {
             })
             .unwrap_or_else(|| "TRUE".to_owned());
         let use_modern = capabilities.search_cte && capabilities.regexp_replace;
+        let (search_query, ignore_separators) = crate::db::catalog::search_query(&request.query);
         let sql = catalog_search_candidates_sql(
             capabilities.search_cte,
             capabilities.regexp_replace,
+            ignore_separators,
         )
         .replace("{scope_predicate}", &scope_predicate);
         let mut query = sqlx::query(AssertSqlSafe(sql));
-        let (search_query, ignore_separators) = crate::db::catalog::search_query(&request.query);
         if use_modern {
             query = query.bind(ignore_separators).bind(ignore_separators);
             if let Some(databases) = selected.as_ref() {
@@ -927,8 +1000,11 @@ impl MySqlAdapter {
                     query = query.bind(database);
                 }
             }
-            let needle = search_query.to_ascii_lowercase();
-            query = query.bind(needle.clone()).bind(needle);
+            // Scope-only SQL when ignore_separators; LOCATE only for raw lowercase needle.
+            if !ignore_separators {
+                let needle = search_query.to_ascii_lowercase();
+                query = query.bind(needle.clone()).bind(needle);
+            }
         }
         let rows = query.fetch_all(&mut *connection).await.map_err(sql_error)?;
         let mut candidates = rows
@@ -3450,12 +3526,30 @@ fn decode_error(error: sqlx::Error) -> DatabaseError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MySqlConstraintPart, MySqlIndexPart, PROBE_SQL, assemble_relation_ddl,
-        group_constraint_parts, group_index_parts, relation_kind, relation_path,
-        search_catalog_kind,
+        MySqlConstraintPart, MySqlIndexPart, MySqlSearchCandidate, PROBE_SQL,
+        assemble_relation_ddl, candidate_search_haystacks, group_constraint_parts,
+        group_index_parts, legacy_search_rank, rank_legacy_search_candidates, relation_kind,
+        relation_path, search_catalog_kind,
     };
     use crate::db::catalog::{CatalogId, CatalogKind, DdlProvenance};
     use uuid::Uuid;
+
+    fn search_candidate(
+        kind: CatalogKind,
+        database: &str,
+        name: &str,
+        relation_name: Option<&str>,
+    ) -> MySqlSearchCandidate {
+        MySqlSearchCandidate {
+            kind,
+            database: database.to_owned(),
+            name: name.to_owned(),
+            relation_name: relation_name.map(str::to_owned),
+            relation_type: Some("BASE TABLE".to_owned()),
+            native_identity: name.to_owned(),
+            comment: None,
+        }
+    }
 
     #[test]
     fn probe_query_avoids_the_reserved_database_alias() {
@@ -3597,5 +3691,29 @@ mod tests {
                 .message
                 .contains("referenced column")
         );
+    }
+
+    #[test]
+    fn legacy_search_rank_matches_normalized_separators() {
+        let candidate = search_candidate(CatalogKind::Table, "app", "foo_bar", Some("foo_bar"));
+        assert_eq!(legacy_search_rank(&candidate, "foobar"), Some(0));
+
+        let ranked =
+            rank_legacy_search_candidates(vec![candidate], "foo-bar");
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].name, "foo_bar");
+    }
+
+    #[test]
+    fn legacy_search_rank_matches_column_via_relation_qualified_path() {
+        let candidate =
+            search_candidate(CatalogKind::Column, "app", "amount", Some("orders"));
+        let [name, path] = candidate_search_haystacks(&candidate);
+        assert_eq!(name, "amount");
+        assert_eq!(path, "app.orders.amount");
+
+        // Needle only appears in the relation-qualified path, not the bare column name.
+        assert_eq!(legacy_search_rank(&candidate, "ordersamount"), Some(3));
+        assert_eq!(legacy_search_rank(&candidate, "orders"), Some(3));
     }
 }
