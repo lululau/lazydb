@@ -4,6 +4,7 @@ use sqlparser::{
 };
 
 use super::{SqlDialect, dialect::parser_dialect, quote_identifier};
+use crate::db::value::CellValue;
 use crate::model::relation::RelationPreviewOptions;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,6 +95,63 @@ pub fn cycle_relation_column_sort(
         items.last_mut().expect("just pushed").options.asc = Some(next == SortDirection::Asc);
     }
     Ok(format_order_by(&items))
+}
+
+pub fn cell_where_clause(
+    column: &str,
+    value: &CellValue,
+    dialect: SqlDialect,
+) -> Result<String, RelationFilterError> {
+    let quoted = quote_identifier(column, dialect);
+    let literal = match value {
+        CellValue::Null => return Ok(format!("{quoted} IS NULL")),
+        CellValue::Boolean(inner) => match dialect {
+            SqlDialect::Postgres => if *inner { "TRUE" } else { "FALSE" }.to_owned(),
+            _ => u8::from(*inner).to_string(),
+        },
+        CellValue::Integer(_) | CellValue::Unsigned(_) => value.clipboard_text(),
+        CellValue::Float(inner) if inner.is_finite() => value.clipboard_text(),
+        CellValue::Float(_) => {
+            return Err(RelationFilterError(
+                "non-finite float values have no portable SQL literal".into(),
+            ));
+        }
+        CellValue::Text(inner) => string_literal(inner, dialect),
+        CellValue::Bytes(inner) => bytes_literal(inner, dialect),
+        CellValue::Date(_)
+        | CellValue::Time(_)
+        | CellValue::DateTime(_)
+        | CellValue::Timestamp(_) => string_literal(&value.clipboard_text(), dialect),
+        CellValue::Unsupported { type_name, .. } => {
+            return Err(RelationFilterError(format!(
+                "values of type `{type_name}` cannot be filtered"
+            )));
+        }
+    };
+    Ok(format!("{quoted} = {literal}"))
+}
+
+fn string_literal(value: &str, dialect: SqlDialect) -> String {
+    let escaped = value.replace('\'', "''");
+    let escaped = if dialect == SqlDialect::MySql {
+        escaped.replace('\\', "\\\\")
+    } else {
+        escaped
+    };
+    format!("'{escaped}'")
+}
+
+fn bytes_literal(value: &[u8], dialect: SqlDialect) -> String {
+    let hex = value
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    match dialect {
+        SqlDialect::MySql => format!("X'{hex}'"),
+        SqlDialect::SqlServer => format!("0x{hex}"),
+        SqlDialect::Postgres => format!("'\\x{hex}'::bytea"),
+        SqlDialect::Sqlite | SqlDialect::Generic => format!("x'{hex}'"),
+    }
 }
 
 fn order_by_column(name: &str, dialect: SqlDialect) -> OrderByExpr {
@@ -367,5 +425,184 @@ mod tests {
             cycle_relation_column_sort("", &["customer]id"], 0, SqlDialect::SqlServer).unwrap(),
             "[customer]]id] DESC"
         );
+    }
+
+    #[test]
+    fn cell_where_clause_generates_literals_per_dialect() {
+        use crate::db::value::CellValue;
+
+        // NULL becomes IS NULL and needs no literal.
+        assert_eq!(
+            cell_where_clause("status", &CellValue::Null, SqlDialect::Postgres).unwrap(),
+            "\"status\" IS NULL"
+        );
+        // Booleans: TRUE/FALSE on Postgres, 1/0 elsewhere.
+        assert_eq!(
+            cell_where_clause("flag", &CellValue::Boolean(true), SqlDialect::Postgres).unwrap(),
+            "\"flag\" = TRUE"
+        );
+        assert_eq!(
+            cell_where_clause("flag", &CellValue::Boolean(false), SqlDialect::MySql).unwrap(),
+            "`flag` = 0"
+        );
+        assert_eq!(
+            cell_where_clause("flag", &CellValue::Boolean(true), SqlDialect::Sqlite).unwrap(),
+            "\"flag\" = 1"
+        );
+        assert_eq!(
+            cell_where_clause("flag", &CellValue::Boolean(true), SqlDialect::SqlServer).unwrap(),
+            "[flag] = 1"
+        );
+        // Numbers stay unquoted.
+        assert_eq!(
+            cell_where_clause("id", &CellValue::Integer(42), SqlDialect::Postgres).unwrap(),
+            "\"id\" = 42"
+        );
+        assert_eq!(
+            cell_where_clause("n", &CellValue::Float(3.5), SqlDialect::Postgres).unwrap(),
+            "\"n\" = 3.5"
+        );
+        // Text: '' escaping everywhere, backslash doubling on MySQL.
+        assert_eq!(
+            cell_where_clause(
+                "name",
+                &CellValue::Text("it's".into()),
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            "\"name\" = 'it''s'"
+        );
+        assert_eq!(
+            cell_where_clause("name", &CellValue::Text("a\\b".into()), SqlDialect::MySql).unwrap(),
+            "`name` = 'a\\\\b'"
+        );
+        assert_eq!(
+            cell_where_clause(
+                "name",
+                &CellValue::Text("a\\b".into()),
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            "\"name\" = 'a\\b'"
+        );
+        // Bytes literals per dialect.
+        assert_eq!(
+            cell_where_clause(
+                "data",
+                &CellValue::Bytes(vec![0xDE, 0xAD]),
+                SqlDialect::MySql
+            )
+            .unwrap(),
+            "`data` = X'DEAD'"
+        );
+        assert_eq!(
+            cell_where_clause(
+                "data",
+                &CellValue::Bytes(vec![0xDE, 0xAD]),
+                SqlDialect::SqlServer
+            )
+            .unwrap(),
+            "[data] = 0xDEAD"
+        );
+        assert_eq!(
+            cell_where_clause(
+                "data",
+                &CellValue::Bytes(vec![0xDE, 0xAD]),
+                SqlDialect::Sqlite
+            )
+            .unwrap(),
+            "\"data\" = x'DEAD'"
+        );
+        assert_eq!(
+            cell_where_clause(
+                "data",
+                &CellValue::Bytes(vec![0xDE, 0xAD]),
+                SqlDialect::Generic
+            )
+            .unwrap(),
+            "\"data\" = x'DEAD'"
+        );
+        assert_eq!(
+            cell_where_clause(
+                "data",
+                &CellValue::Bytes(vec![0xDE, 0xAD]),
+                SqlDialect::Postgres
+            )
+            .unwrap(),
+            "\"data\" = '\\xDEAD'::bytea"
+        );
+        // Empty bytes stay valid literals on every dialect.
+        assert_eq!(
+            cell_where_clause("data", &CellValue::Bytes(Vec::new()), SqlDialect::MySql).unwrap(),
+            "`data` = X''"
+        );
+        assert_eq!(
+            cell_where_clause("data", &CellValue::Bytes(Vec::new()), SqlDialect::SqlServer)
+                .unwrap(),
+            "[data] = 0x"
+        );
+        assert_eq!(
+            cell_where_clause("data", &CellValue::Bytes(Vec::new()), SqlDialect::Sqlite).unwrap(),
+            "\"data\" = x''"
+        );
+        assert_eq!(
+            cell_where_clause("data", &CellValue::Bytes(Vec::new()), SqlDialect::Postgres).unwrap(),
+            "\"data\" = '\\x'::bytea"
+        );
+    }
+
+    #[test]
+    fn cell_where_clause_quotes_temporal_values_and_rejects_unusable_values() {
+        use crate::db::value::CellValue;
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+
+        let date = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        assert_eq!(
+            cell_where_clause("born", &CellValue::Date(date), SqlDialect::Postgres).unwrap(),
+            "\"born\" = '2026-08-28'"
+        );
+        let datetime = NaiveDateTime::new(date, NaiveTime::from_hms_opt(10, 20, 31).unwrap());
+        assert_eq!(
+            cell_where_clause("at", &CellValue::DateTime(datetime), SqlDialect::Postgres).unwrap(),
+            "\"at\" = '2026-08-28 10:20:31'"
+        );
+        let zoned = chrono::DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+            datetime,
+            chrono::FixedOffset::east_opt(8 * 60 * 60).unwrap(),
+        );
+        assert_eq!(
+            cell_where_clause("at", &CellValue::Timestamp(zoned), SqlDialect::Postgres).unwrap(),
+            "\"at\" = '2026-08-28 18:20:31+08:00'"
+        );
+        assert!(cell_where_clause("n", &CellValue::Float(f64::NAN), SqlDialect::Postgres).is_err());
+        assert!(
+            cell_where_clause(
+                "doc",
+                &CellValue::Unsupported {
+                    type_name: "xml".into(),
+                    preview: "<a/>".into()
+                },
+                SqlDialect::Postgres
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn generated_empty_bytes_clauses_survive_preview_validation() {
+        use crate::db::value::CellValue;
+
+        for dialect in [
+            SqlDialect::MySql,
+            SqlDialect::SqlServer,
+            SqlDialect::Sqlite,
+            SqlDialect::Postgres,
+        ] {
+            let clause = cell_where_clause("data", &CellValue::Bytes(Vec::new()), dialect).unwrap();
+            assert!(
+                validate_relation_preview_options(&clause, "", dialect).is_ok(),
+                "validation rejected: {clause} ({dialect:?})",
+            );
+        }
     }
 }
