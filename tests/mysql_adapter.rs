@@ -121,6 +121,17 @@ fn mysql_index_sql_omits_expression_without_capability() {
 }
 
 #[test]
+fn mysql_column_sql_omits_generation_expression_when_unavailable() {
+    let legacy = mysql::relation_columns_sql(false);
+    assert!(legacy.contains("column_default"));
+    assert!(legacy.contains("extra"));
+    assert!(!legacy.contains("generation_expression"));
+
+    let modern = mysql::relation_columns_sql(true);
+    assert!(modern.contains("generation_expression"));
+}
+
+#[test]
 fn mysql_catalog_search_sql_pushes_literal_matching_ranking_scope_and_bound() {
     let sql = mysql::CATALOG_SEARCH_CANDIDATES_SQL;
     assert!(sql.contains("information_schema.schemata"));

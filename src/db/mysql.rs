@@ -86,6 +86,22 @@ ORDER BY BINARY index_name, seq_in_index"#
 
 pub const CATALOG_PAGE_INDEXES_SQL: &str = catalog_page_indexes_sql(true);
 
+pub fn relation_columns_sql(generation_expression: bool) -> &'static str {
+    if generation_expression {
+        "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
+         column_default, extra, generation_expression, numeric_precision, numeric_scale, \
+         character_maximum_length, collation_name, character_set_name, column_comment \
+         FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
+         ORDER BY ordinal_position"
+    } else {
+        "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
+         column_default, extra, numeric_precision, numeric_scale, \
+         character_maximum_length, collation_name, character_set_name, column_comment \
+         FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
+         ORDER BY ordinal_position"
+    }
+}
+
 const PROBE_SQL: &str = "SELECT VERSION() AS version, DATABASE() AS current_database";
 
 pub const CATALOG_PAGE_BEGIN_SQL: &str =
@@ -1409,18 +1425,13 @@ impl MySqlAdapter {
             );
         }
 
-        let rows = sqlx::query(
-            "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
-             column_default, extra, generation_expression, numeric_precision, numeric_scale, \
-             character_maximum_length, collation_name, character_set_name, column_comment \
-             FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
-             ORDER BY ordinal_position",
-        )
-        .bind(database)
-        .bind(relation_name)
-        .fetch_all(&mut *connection)
-        .await
-        .map_err(sql_error)?;
+        let has_generation_expression = capabilities.generation_expression;
+        let rows = sqlx::query(relation_columns_sql(has_generation_expression))
+            .bind(database)
+            .bind(relation_name)
+            .fetch_all(&mut *connection)
+            .await
+            .map_err(sql_error)?;
         for row in rows {
             let ordinal = checked_u32(
                 row.try_get::<u64, _>(0).map_err(decode_error)?,
@@ -1428,7 +1439,18 @@ impl MySqlAdapter {
             )?;
             let name: String = row.try_get(1).map_err(decode_error)?;
             let extra: String = row.try_get(6).map_err(decode_error)?;
-            let generation_expression: String = row.try_get(7).map_err(decode_error)?;
+            // With generation_expression: indexes 7..13 are expression, precision..comment.
+            // Without it: indexes 7..12 are precision..comment (shifted −1).
+            let (generation_expression, precision_idx, comment_idx) =
+                if has_generation_expression {
+                    (
+                        row.try_get::<String, _>(7).map_err(decode_error)?,
+                        8usize,
+                        13usize,
+                    )
+                } else {
+                    (String::new(), 7usize, 12usize)
+                };
             let generated = !generation_expression.is_empty()
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");
@@ -1457,27 +1479,29 @@ impl MySqlAdapter {
             });
             metadata.hidden = OptionalMetadata::Unsupported;
             metadata.numeric_precision = OptionalMetadata::Supported(
-                row.try_get::<Option<u64>, _>(8)
+                row.try_get::<Option<u64>, _>(precision_idx)
                     .map_err(decode_error)?
                     .map(|value| checked_u32(value, "numeric precision"))
                     .transpose()?,
             );
             metadata.numeric_scale = OptionalMetadata::Supported(
-                row.try_get::<Option<u64>, _>(9)
+                row.try_get::<Option<u64>, _>(precision_idx + 1)
                     .map_err(decode_error)?
                     .map(|value| checked_u32(value, "numeric scale"))
                     .transpose()?,
             );
             metadata.character_maximum_length = OptionalMetadata::Supported(
-                row.try_get::<Option<i64>, _>(10)
+                row.try_get::<Option<i64>, _>(precision_idx + 2)
                     .map_err(decode_error)?
                     .map(non_negative_count)
                     .transpose()?,
             );
-            metadata.collation =
-                OptionalMetadata::Supported(row.try_get(11).map_err(decode_error)?);
-            metadata.character_set =
-                OptionalMetadata::Supported(row.try_get(12).map_err(decode_error)?);
+            metadata.collation = OptionalMetadata::Supported(
+                row.try_get(precision_idx + 3).map_err(decode_error)?,
+            );
+            metadata.character_set = OptionalMetadata::Supported(
+                row.try_get(precision_idx + 4).map_err(decode_error)?,
+            );
             metadata.constraint_memberships = memberships.remove(&name).unwrap_or_default();
             metadata.constraint_memberships.sort_by(|left, right| {
                 catalog_kind_rank(left.constraint_id.kind)
@@ -1496,7 +1520,7 @@ impl MySqlAdapter {
                     qualified_object(database, &name),
                     "column",
                     OptionalMetadata::Supported(empty_as_none(
-                        row.try_get(13).map_err(decode_error)?,
+                        row.try_get(comment_idx).map_err(decode_error)?,
                     )),
                     CatalogMetadata::Column(metadata),
                 )
