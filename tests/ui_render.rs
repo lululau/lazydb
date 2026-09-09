@@ -3866,6 +3866,18 @@ fn explorer_find_shows_phase_specific_navigation_hint() {
 }
 
 #[test]
+fn explorer_search_status_hint_names_editing_controls() {
+    let mut app = fixture();
+    app.focus = Focus::Explorer;
+    app.update(Action::ExplorerSearchOpen);
+    app.update(Action::ExplorerSearchInsert('u'));
+    let output = render(&app, 180, 36);
+
+    assert!(output.contains("0 results  ↑/↓ select  Ctrl+N/P match"), "{output}");
+    assert!(!output.contains("n/N next/prev"), "{output}");
+}
+
+#[test]
 fn explorer_width_is_adaptive_and_clamped_in_split_layouts() {
     let app = fixture();
     for (width, expected) in [(120, 40), (180, 56), (300, 56)] {

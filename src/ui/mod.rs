@@ -2618,7 +2618,7 @@ fn render_explorer_search(
                 }
             }
             _ => format!(
-                "{} results  n/N next/prev  Enter locate  Esc close",
+                "{} results  ↑/↓ select  Ctrl+N/P match  Enter locate  Esc close",
                 search.frontend_match_rows.len()
             ),
         };
