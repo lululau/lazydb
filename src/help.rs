@@ -2852,6 +2852,7 @@ pub(crate) fn configured_sequence(
         HelpShortcutId::ExplorerRefresh => Some("explorer-refresh"),
         HelpShortcutId::ExplorerToggle => Some("explorer-toggle"),
         HelpShortcutId::OpenUpdateCenter => Some("update"),
+        HelpShortcutId::EditorComplete => Some("trigger-completion"),
         _ => None,
     };
     command

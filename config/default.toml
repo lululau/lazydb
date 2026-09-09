@@ -155,8 +155,9 @@ align-top = ["z t"]
 align-bottom = ["z b"]
 
 [keybindings.editor]
-# Editor-owned Vim and modalkit keys are intentionally documented here as a
-# preset, but are not individually remapped by the application mapper yet.
+# Ctrl-Space triggers completion in SQL editor insert mode.
+# Alt-/ is also supported as an alternate completion trigger (common in Emacs/Eclipse and macOS-friendly).
+trigger-completion = ["Ctrl-Space", "Alt-/"]
 
 [keybindings.overlays]
 # Overlay-specific text-entry and confirmation keys remain context-owned.

@@ -68,6 +68,7 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "explorer-new-profile",
     "explorer-refresh",
     "explorer-toggle",
+    "trigger-completion",
 ];
 
 #[derive(Debug, Error)]

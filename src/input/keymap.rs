@@ -824,6 +824,12 @@ impl Keymap {
             return Some(Action::EditorKey(event));
         }
         if app.focus == Focus::Editor
+            && app.active_editor_mode() == EditorMode::Insert
+            && self.bindings.matches("trigger-completion", event)
+        {
+            return Some(Action::CompletionExplicit);
+        }
+        if app.focus == Focus::Editor
             && matches!(
                 app.active_editor_mode(),
                 EditorMode::Insert | EditorMode::Replace
@@ -1368,12 +1374,6 @@ impl Keymap {
                     }
                 }
                 KeyCode::Char('h') if app.focus == Focus::Editor => Some(Action::EditorKey(event)),
-                KeyCode::Char(' ')
-                    if app.focus == Focus::Editor
-                        && app.active_editor_mode() == EditorMode::Insert =>
-                {
-                    Some(Action::CompletionExplicit)
-                }
                 _ => None,
             };
         }

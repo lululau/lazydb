@@ -314,7 +314,7 @@ workspace tabs.
 | `Ctrl-w/U/H` | Delete previous word, to line start, or backspace |
 | `Cmd-Z` (macOS), `Ctrl-Z` (Linux/Windows) | Undo the focused editor text edit |
 | `Cmd-Shift-Z` (macOS), `Ctrl-Shift-Z` (Linux/Windows) | Redo the focused editor text edit |
-| `Ctrl-Space` | Trigger completion |
+| `Ctrl-Space`, `Alt-/` | Trigger completion |
 | `Esc` | Return to Normal |
 | `F5` | Run SQL |
 

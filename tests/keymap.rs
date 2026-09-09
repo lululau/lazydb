@@ -3934,3 +3934,66 @@ fn profile_confirmation_and_paste_are_contextual_and_redacted() {
         [Action::EditorPaste("a\nb".into()),]
     );
 }
+
+#[test]
+fn trigger_completion_triggers_in_sql_insert_mode_via_ctrl_space_and_alt_slash() {
+    let mut keymap = Keymap::default();
+    let mut app = App::new(Vec::new());
+    assert_eq!(app.active_editor_mode(), EditorMode::Insert);
+    assert_eq!(app.focus, Focus::Editor);
+
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+    let alt_slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT);
+
+    assert_eq!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
+    assert_eq!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+
+    // Normal mode should not trigger completion
+    app.update(Action::EditorKey(key(KeyCode::Esc)));
+    assert_eq!(app.active_editor_mode(), EditorMode::Normal);
+    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
+    assert_ne!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+
+    // Explorer focus should not trigger completion
+    app.focus = Focus::Explorer;
+    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
+    assert_ne!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+}
+
+#[test]
+fn custom_trigger_completion_keybindings_are_respected() {
+    let toml = r#"
+    version = 1
+    [terminal]
+    mouse = "auto"
+    color = "auto"
+    [ui]
+    icons = "nerd-font"
+    motion = "full"
+    [execution]
+    confirmation = "risky"
+    [dashboard]
+    refresh_interval_seconds = 5
+    [keybindings]
+    preset = "vim"
+    sequence_timeout_ms = 750
+    [keybindings.editor]
+    trigger-completion = ["Ctrl-k"]
+    "#;
+    let config = lazydb::config::AppConfig::from_toml(toml).unwrap();
+    let bindings = config.keybindings.key_bindings().unwrap();
+    let mut keymap = Keymap::with_sequence_timeout_and_bindings(
+        std::time::Duration::from_millis(750),
+        bindings,
+    );
+
+    let app = App::new(Vec::new());
+    assert_eq!(app.active_editor_mode(), EditorMode::Insert);
+
+    let ctrl_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+
+    assert_eq!(keymap.map(ctrl_k, &app), Some(Action::CompletionExplicit));
+    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
+}
+
