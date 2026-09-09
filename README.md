@@ -254,13 +254,12 @@ plugin configuration.
 | Database | Requirement | Catalog support |
 | --- | --- | --- |
 | PostgreSQL | 12 or newer | Databases, schemas, tables, columns, indexes, constraints, views, materialized views, sequences, functions, procedures, types; catalog editing also covers databases and roles; relation rename reconciliation uses readable `pg_class`/`pg_namespace` OIDs |
-| Oracle MySQL | 8.0.13 or newer | Databases, tables, views, functions, procedures, triggers |
+| Oracle MySQL / MariaDB | Oracle MySQL 5.6+ or MariaDB 10.1+ | Databases, tables, views, functions, procedures, triggers. Newer-only metadata (for example functional index expressions) is omitted on older servers |
 | SQL Server | SQL Server 2012 or newer | Databases, schemas, tables, views, functions, procedures, sequences, triggers, indexes, keys, foreign keys, and column metadata |
 | SQLite | Native SQLite schema support | Tables, views, indexes, foreign keys, and triggers |
 
-MariaDB is not part of the current MySQL catalog contract. See the complete
-[database capability matrix](docs/database-capabilities.md) for metadata,
-paging, relation DDL, and version details.
+See the complete [database capability matrix](docs/database-capabilities.md)
+for metadata, paging, relation DDL, and version details.
 
 ## Coding-Agent Access
 

@@ -143,8 +143,10 @@ SSL, DDL, cancellation, and transaction behavior must remain visible.
 
 Catalog requests use bounded keyset pages (maximum page size 500), with separate
 targets for databases, schemas, groups, objects, and relation children. The
-PostgreSQL adapter requires server version 12 or newer; the Oracle MySQL catalog
-adapter requires 8.0.13 or newer and rejects MariaDB for this contract. SQLite
+PostgreSQL adapter requires server version 12 or newer. The MySQL catalog
+adapter accepts Oracle MySQL 5.6+ or MariaDB 10.1+, parses `VERSION()`, and
+selects SQL variants from a capability layer; newer-only metadata is omitted
+silently on older servers rather than rejecting the connection. SQLite
 supports metadata from native schema tables and loads each page inside a
 transaction that is rolled back afterward. SQLite deliberately uses a single
 physical pool connection, and catalog operations do not write database state.

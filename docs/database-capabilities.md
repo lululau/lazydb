@@ -23,7 +23,7 @@ queries or terminate sessions.
 | Driver | Server/version gate | Namespace model | Catalog groups | Metadata support |
 | --- | --- | --- | --- | --- |
 | PostgreSQL | PostgreSQL 12 or newer | Database + schema | Tables, views, materialized views, sequences, functions, procedures, types | Type family, defaults, identity, generated expressions, character length, collation, comments; numeric precision/scale is not advertised |
-| MySQL | Oracle MySQL 8.0.13 or newer; MariaDB is rejected for this catalog contract | Database is schema | Tables, views, functions, procedures, triggers | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments |
+| MySQL | Oracle MySQL 5.6+ or MariaDB 10.1+; newer-only metadata (for example functional index expressions) is omitted on older servers | Database is schema | Tables, views, functions, procedures, triggers | Type family, defaults, auto-increment, generated expressions, numeric precision/scale, character length, collation, character set, comments |
 | SQL Server | SQL Server 2012 or newer | Database + schema | Tables, views, functions, procedures, sequences, triggers; relation children include columns, indexes, keys, and foreign keys | Type family, defaults, identity, computed/generated expressions, numeric precision/scale, character length, collation, comments, and rowversion metadata |
 | SQLite | SQLite metadata support through native schema tables; no server-version gate | Database + attached schema aliases | Tables, views, triggers | Default expressions and hidden-column metadata; unsupported fields are represented as unsupported |
 
@@ -147,10 +147,11 @@ Driver-specific DDL behavior is:
   It does not require database or role creation privileges. A dropped object,
   an OID reused for another relation kind, or an object hidden by permissions
   is not treated as a rename.
-- Oracle MySQL reads the main table/view and each trigger through `SHOW CREATE`,
-  discovers triggers through `information_schema`, and assembles the native
-  object statement with sorted trigger statements. MariaDB is not part of this
-  contract.
+- Oracle MySQL and MariaDB read the main table/view and each trigger through
+  `SHOW CREATE`, discover triggers through `information_schema`, and assemble
+  the native object statement with sorted trigger statements. Catalog SQL
+  follows parsed server capabilities; fields that exist only on newer servers
+  are omitted rather than failing the read.
 - SQLite reads the main table/view and related indexes/triggers from each
   schema's `sqlite_schema` table. The complete read runs on the single SQLite
   connection inside a transaction that is rolled back afterward. A relation
