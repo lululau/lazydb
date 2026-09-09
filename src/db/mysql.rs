@@ -71,13 +71,14 @@ ORDER BY table_name, index_name, seq_in_index
 "#;
 
 pub const fn catalog_page_indexes_sql(statistics_expression: bool) -> &'static str {
+    // CAST: 5.6/5.7 expose SEQ_IN_INDEX as signed BIGINT; 8.0 uses INT UNSIGNED.
     if statistics_expression {
-        r#"SELECT index_name, non_unique, seq_in_index, column_name, expression
+        r#"SELECT index_name, non_unique, CAST(seq_in_index AS UNSIGNED), column_name, expression
 FROM information_schema.statistics
 WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ?
 ORDER BY BINARY index_name, seq_in_index"#
     } else {
-        r#"SELECT index_name, non_unique, seq_in_index, column_name
+        r#"SELECT index_name, non_unique, CAST(seq_in_index AS UNSIGNED), column_name
 FROM information_schema.statistics
 WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ?
 ORDER BY BINARY index_name, seq_in_index"#
@@ -87,16 +88,17 @@ ORDER BY BINARY index_name, seq_in_index"#
 pub const CATALOG_PAGE_INDEXES_SQL: &str = catalog_page_indexes_sql(true);
 
 pub fn relation_columns_sql(generation_expression: bool) -> &'static str {
+    // CAST: CHARACTER_MAXIMUM_LENGTH is UNSIGNED on 5.6/5.7 and signed BIGINT on 8.0.
     if generation_expression {
         "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
          column_default, extra, generation_expression, numeric_precision, numeric_scale, \
-         character_maximum_length, collation_name, character_set_name, column_comment \
+         CAST(character_maximum_length AS SIGNED), collation_name, character_set_name, column_comment \
          FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
          ORDER BY ordinal_position"
     } else {
         "SELECT ordinal_position, column_name, column_type, data_type, is_nullable, \
          column_default, extra, numeric_precision, numeric_scale, \
-         character_maximum_length, collation_name, character_set_name, column_comment \
+         CAST(character_maximum_length AS SIGNED), collation_name, character_set_name, column_comment \
          FROM information_schema.columns WHERE BINARY table_schema=BINARY ? AND BINARY table_name=BINARY ? \
          ORDER BY ordinal_position"
     }
@@ -2180,11 +2182,12 @@ impl MySqlAdapter {
         database: &str,
         relation: &str,
     ) -> Result<Vec<MySqlConstraintInfo>, DatabaseError> {
+        // CAST ordinals: signed BIGINT on 5.6/5.7, INT UNSIGNED on 8.0.
         let rows = sqlx::query(
             "SELECT tc.constraint_catalog, tc.constraint_schema, tc.table_schema, tc.table_name, \
-             tc.constraint_name, tc.constraint_type, kcu.ordinal_position, \
+             tc.constraint_name, tc.constraint_type, CAST(kcu.ordinal_position AS UNSIGNED), \
              kcu.column_name, kcu.referenced_table_schema, kcu.referenced_table_name, \
-             kcu.referenced_column_name, kcu.position_in_unique_constraint \
+             kcu.referenced_column_name, CAST(kcu.position_in_unique_constraint AS UNSIGNED) \
              FROM information_schema.table_constraints tc \
              JOIN information_schema.key_column_usage kcu \
                ON BINARY kcu.constraint_catalog=BINARY tc.constraint_catalog \
