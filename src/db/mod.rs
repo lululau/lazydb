@@ -6,6 +6,7 @@ pub mod monitor;
 pub mod mssql;
 pub mod mutation;
 pub mod mysql;
+pub mod mysql_version;
 pub mod postgres;
 pub mod query;
 pub mod sqlite;
