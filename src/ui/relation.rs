@@ -225,30 +225,6 @@ pub(crate) fn render(
     }
 }
 
-pub(crate) fn ddl_editor_viewport(area: Rect, app: &App) -> Option<(uuid::Uuid, EditorViewport)> {
-    let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
-        return None;
-    };
-    if tab.view != RelationView::Ddl {
-        return None;
-    }
-    let status = !matches!(tab.ddl, RelationLoad::Ready(_));
-    let layout = relation_ddl_layout(area, status);
-    let inner = panel_block(
-        " RELATION DDL ",
-        app.focus == Focus::Results,
-        Theme::default(),
-    )
-    .inner(layout[1]);
-    Some((
-        tab.ddl_editor_id,
-        EditorViewport {
-            width: inner.width as usize,
-            height: inner.height as usize,
-        },
-    ))
-}
-
 fn register_json_selection_target(
     state: &mut super::UiState,
     tab_id: uuid::Uuid,
@@ -1104,6 +1080,11 @@ fn render_ddl_editor(
         width: inner.width as usize,
         height: inner.height as usize,
     };
+    if let Some(tab) = app.tabs.get(app.active_tab)
+        && let WorkspaceTab::Relation(tab) = tab
+    {
+        state.ddl_editor_viewport = Some((tab.ddl_editor_id, viewport));
+    }
     let snapshot = supplied_snapshot
         .cloned()
         .or_else(|| app.active_ddl_editor_snapshot(viewport).ok());

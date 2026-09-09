@@ -257,6 +257,7 @@ pub struct UiState {
     pub hit_regions: Vec<HitRegion>,
     pub editor_viewport: Option<EditorViewport>,
     pub output_viewport: Option<(Uuid, EditorViewport)>,
+    pub ddl_editor_viewport: Option<(Uuid, EditorViewport)>,
     pub completion_popup: Option<Rect>,
     pub grid_viewport: Option<DataGridViewport>,
     pub grid_horizontal_scroll: Option<GridHorizontalScrollTargets>,
@@ -354,6 +355,7 @@ impl UiState {
             hit_regions: Vec::new(),
             editor_viewport: None,
             output_viewport: None,
+            ddl_editor_viewport: None,
             completion_popup: None,
             grid_viewport: None,
             grid_horizontal_scroll: None,
@@ -766,6 +768,7 @@ pub fn render_with_state_using_icons_sequence_and_theme(
     state.hit_regions.clear();
     state.editor_viewport = None;
     state.output_viewport = None;
+    state.ddl_editor_viewport = None;
     state.completion_popup = None;
     state.grid_viewport = None;
     state.grid_horizontal_scroll = None;

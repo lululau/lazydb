@@ -20847,6 +20847,100 @@ mod tests {
     }
 
     #[test]
+    fn relation_ddl_scroll_end_reaches_last_line() {
+        let profile_id = Uuid::new_v4();
+        let connection = ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        };
+        let relation_id =
+            CatalogId::new(profile_id, CatalogKind::Table, ["items", "main", "items"]);
+        let request = RelationRequest {
+            tab_id: Uuid::new_v4(),
+            tab_generation: 0,
+            request_id: 0,
+            connection,
+            relation: RelationKey {
+                profile_id,
+                object_id: relation_id.clone(),
+            },
+            kind: RelationRequestKind::Ddl,
+            scope: CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main")),
+            options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
+        };
+        let mut ddl = test_relation_ddl(request, relation_id);
+        ddl.sql = (0..100)
+            .map(|index| format!("  `col_{index}` varchar(64) DEFAULT NULL,"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut tab = RelationTab::new("t_order");
+        tab.view = RelationView::Ddl;
+        tab.ddl = RelationLoad::Ready(OwnedSnapshot {
+            value: ddl,
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id,
+                scope: CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main")),
+            },
+        });
+        let session_id = tab.ddl_editor_id;
+        let mut app = App::new(Vec::new());
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+
+        // Render the relation view and pick up the viewport reported by the
+        // RELATION DDL panel itself, exactly like the runtime sync loop does.
+        let mut ui_state = crate::ui::UiState::new();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 50)).unwrap();
+        terminal
+            .draw(|frame| {
+                crate::ui::relation::render(
+                    frame,
+                    frame.area(),
+                    &app,
+                    crate::ui::theme::Theme::default(),
+                    &mut ui_state,
+                );
+            })
+            .unwrap();
+        let (reported_id, reported) = ui_state
+            .ddl_editor_viewport
+            .expect("reported ddl editor viewport");
+        assert_eq!(reported_id, session_id);
+        // The panel viewport reflects the real panel (below the view
+        // selector, inside its borders), not the full terminal area.
+        assert_eq!(reported.width, 78);
+        assert_eq!(reported.height, 46);
+
+        app.update(Action::DdlEditorViewportChanged {
+            session_id,
+            viewport: reported,
+        });
+        app.update(Action::ReadOnlyEditorScroll {
+            session_id,
+            rows: 100_000,
+            columns: 0,
+        });
+
+        let snapshot = app
+            .active_ddl_editor_snapshot(reported)
+            .expect("ddl snapshot");
+        let last_visible = snapshot
+            .lines
+            .iter()
+            .take(reported.height)
+            .next_back()
+            .expect("visible ddl lines")
+            .line;
+        assert_eq!(last_visible, 99);
+    }
+
+    #[test]
     fn stale_query_results_cannot_replace_newer_runs() {
         let profile = import_connection_url(":memory:", Some("query"))
             .unwrap()
