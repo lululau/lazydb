@@ -372,6 +372,8 @@ pub enum HelpShortcutId {
     ResultsCopyRow,
     ResultsCopyRowWithHeaders,
     ResultsToggleView,
+    ResultsFilterCell,
+    ResultsSortColumn,
     RelationWhere,
     RelationOrderBy,
     RelationApplyInputs,
@@ -634,7 +636,8 @@ const fn footer_priority(id: HelpShortcutId) -> Option<u8> {
         | RelationInsertRow => 6,
         ExplorerSearchOpen | EditorDeleteWord | ResultsCopyRow | RelationVisualLine
         | RelationYankRow => 7,
-        ResultsToggleView | RelationPaste | ExplorerRefresh | RelationBusyData => 8,
+        ResultsToggleView | ResultsFilterCell | ResultsSortColumn | RelationPaste
+        | ExplorerRefresh | RelationBusyData => 8,
         DataQueryWhere | RelationWhere | RelationCommit => 9,
         DataQueryOrderBy | RelationOrderBy | RelationBusyRefresh => 10,
         Help => 11,
@@ -1588,6 +1591,22 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [RelationDataBrowse],
         "s",
         "focus ORDER BY",
+        DataQueryAvailable,
+        executable
+    ),
+    row!(
+        ResultsFilterCell,
+        [SqlResultsData, RelationDataBrowse],
+        "F",
+        "filter rows by selected cell value",
+        DataQueryAvailable,
+        executable
+    ),
+    row!(
+        ResultsSortColumn,
+        [SqlResultsData, RelationDataBrowse],
+        "O",
+        "sort by selected column (desc/asc/none)",
         DataQueryAvailable,
         executable
     ),
@@ -3438,6 +3457,26 @@ mod tests {
                 .any(|row| row.id == HelpShortcutId::RelationWhere)
         );
         assert!(available.len() > unavailable.len());
+    }
+
+    #[test]
+    fn filter_and_sort_shortcuts_listed_for_both_grid_contexts() {
+        for context in [
+            ShortcutContext::RelationDataBrowse,
+            ShortcutContext::SqlResultsData,
+        ] {
+            let shortcuts = shortcuts(context, ShortcutCapabilities::relation_data());
+            let filter = shortcuts
+                .iter()
+                .find(|shortcut| shortcut.id == HelpShortcutId::ResultsFilterCell)
+                .expect("filter shortcut listed");
+            assert_eq!(filter.sequence, "F");
+            let sort = shortcuts
+                .iter()
+                .find(|shortcut| shortcut.id == HelpShortcutId::ResultsSortColumn)
+                .expect("sort shortcut listed");
+            assert_eq!(sort.sequence, "O");
+        }
     }
 
     #[test]

@@ -2088,6 +2088,8 @@ impl App {
                 include_headers: true,
             }],
             Id::ResultsToggleView => vec![Action::ToggleResultView],
+            Id::ResultsFilterCell => vec![Action::FilterGridCellByValue],
+            Id::ResultsSortColumn => vec![Action::CycleSelectedColumnSort],
             Id::ResizeHeightIncrease => crate::model::workspace::pane_resize(self.focus, '+', 1)
                 .map_or_else(Vec::new, |resize| vec![Action::ResizePane(resize)]),
             Id::ResizeHeightDecrease => crate::model::workspace::pane_resize(self.focus, '-', 1)
