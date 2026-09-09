@@ -8298,7 +8298,40 @@ impl App {
                 }
                 self.update(Action::CycleDataColumnSort(column))
             }
-            Action::FilterGridCellByValue => Vec::new(),
+            Action::FilterGridCellByValue => {
+                let (_, columns, dialect) = match self.data_grid_query_context() {
+                    Ok(context) => context,
+                    Err(DataGridQueryContextFailure::Unavailable) => return Vec::new(),
+                    Err(failure) => {
+                        self.notify_warning("Filter", failure.message());
+                        return Vec::new();
+                    }
+                };
+                let column_index = self.active_grid_column();
+                let Some(column) = columns.get(column_index) else {
+                    return Vec::new();
+                };
+                let Some((_, row, _, _)) = self.active_record_snapshot() else {
+                    return Vec::new();
+                };
+                let Some(value) = row.get(column_index) else {
+                    return Vec::new();
+                };
+                match sql::cell_where_clause(&column.name, value, dialect) {
+                    Ok(clause) => {
+                        match self.tabs.get_mut(self.active_tab) {
+                            Some(WorkspaceTab::Relation(tab)) => tab.query.where_input.set(clause),
+                            Some(WorkspaceTab::Sql(tab)) => tab.query.where_input.set(clause),
+                            _ => return Vec::new(),
+                        }
+                        self.update(Action::SubmitDataQuery)
+                    }
+                    Err(error) => {
+                        self.notify_warning("Filter", error.to_string());
+                        Vec::new()
+                    }
+                }
+            }
             Action::CycleDataColumnSort(column) => {
                 let Ok((order_by, columns, dialect)) = self.data_grid_query_context() else {
                     return Vec::new();
@@ -18424,6 +18457,209 @@ mod tests {
             [Command::RunDerivedQueryPage { order_by_clause, .. }]
                 if order_by_clause == "\"name\" DESC"
         ));
+    }
+
+    fn filter_relation_app(id_value: CellValue) -> App {
+        let mut profile = import_connection_url("sqlite::memory:", Some("items"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        profile.catalog_scope =
+            CatalogScope::for_profile(DatabaseKind::Sqlite, "items", Some("main"));
+        let connection = ConnectionIdentity {
+            profile_id,
+            generation: 1,
+        };
+        let relation_id =
+            CatalogId::new(profile_id, CatalogKind::Table, ["items", "main", "items"]);
+        let relation_key = RelationKey {
+            profile_id,
+            object_id: relation_id,
+        };
+        let mut app = App::new(vec![profile.clone()]);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = connection.generation;
+        app.connection.status = ConnectionStatus::Connected;
+        app.connection.target = Some(ExecutionTarget {
+            profile_id,
+            database: "items".into(),
+            schema: Some("main".into()),
+        });
+        let result = ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "text".into(),
+                },
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "bigint".into(),
+                },
+            ],
+            rows: vec![vec![CellValue::Text("one".into()), id_value]],
+            affected_rows: 0,
+        };
+        let mut tab = RelationTab::with_descriptor(
+            RelationDescriptor {
+                key: relation_key,
+                qualified_name: QualifiedName {
+                    database: Some("items".into()),
+                    schema: Some("main".into()),
+                    object: "items".into(),
+                },
+                kind: CatalogKind::Table,
+                title: "items".into(),
+            },
+            RelationView::Data,
+        );
+        tab.data = RelationLoad::Ready(OwnedSnapshot {
+            value: crate::db::RelationPreview {
+                sql: "SELECT * FROM main.items".into(),
+                result: QueryOutcome::from_result_set(result, Duration::ZERO, Duration::ZERO),
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    1,
+                ),
+                row_versions: None,
+            },
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id,
+                scope: profile.catalog_scope.clone(),
+            },
+        });
+        tab.grid.selected_column = 1;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+        app
+    }
+
+    #[test]
+    fn filter_selected_cell_submits_derived_where_clause() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id, name FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("one".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+            },
+        });
+        app.active_console_mut().query.where_input.set("id > 0");
+
+        let commands = app.update(Action::FilterGridCellByValue);
+
+        assert_eq!(app.active_console().query.where_input.value(), "\"id\" = 1");
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RunDerivedQueryPage { where_clause, .. }]
+                if where_clause == "\"id\" = 1"
+        ));
+    }
+
+    #[test]
+    fn filter_selected_null_cell_reloads_relation_preview_with_is_null() {
+        let mut app = filter_relation_app(CellValue::Null);
+
+        let commands = app.update(Action::FilterGridCellByValue);
+
+        let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+            panic!("expected relation tab");
+        };
+        assert_eq!(tab.query.where_input.value(), "\"id\" IS NULL");
+        assert!(matches!(
+            &commands[..],
+            [Command::LoadRelationPreview(request)]
+                if request.options.where_clause.as_deref() == Some("\"id\" IS NULL")
+        ));
+    }
+
+    #[test]
+    fn filter_unsupported_cell_warns_without_submission() {
+        let mut app = filter_relation_app(CellValue::Unsupported {
+            type_name: "xml".into(),
+            preview: "<a/>".into(),
+        });
+
+        let commands = app.update(Action::FilterGridCellByValue);
+
+        assert!(commands.is_empty());
+        let Some(WorkspaceTab::Relation(tab)) = app.tabs.get(app.active_tab) else {
+            panic!("expected relation tab");
+        };
+        assert!(tab.query.where_input.value().is_empty());
+        assert_eq!(app.notifications.history().next().unwrap().title, "Filter");
+    }
+
+    #[test]
+    fn sort_key_warns_without_succeeded_execution() {
+        let (mut app, _tab_id, _generation) = connected_query_app("SELECT id FROM users");
+        {
+            // The dispatched base query has not finished, so no execution has
+            // succeeded yet; reach the NoSucceededExecution branch by leaving
+            // the running state like QueryFinished eventually would.
+            let tab = app.active_console_mut();
+            tab.query.capability = DataQueryCapability::Sql;
+            tab.result_view = ResultView::Data;
+            tab.query_status = QueryStatus::Idle;
+        }
+
+        let commands = app.update(Action::CycleSelectedColumnSort);
+
+        assert!(commands.is_empty());
+        assert_eq!(app.notifications.history().next().unwrap().title, "Sort");
+    }
+
+    #[test]
+    fn filter_warns_on_ambiguous_result_columns() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id AS id, id AS ID");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "ID".into(),
+                            type_name: "bigint".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Integer(2)]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+            },
+        });
+
+        let commands = app.update(Action::FilterGridCellByValue);
+
+        assert!(commands.is_empty());
+        let notification = app.notifications.history().next().unwrap();
+        assert_eq!(notification.title, "Filter");
+        assert!(notification.body.contains("ambiguous"));
     }
 
     #[test]

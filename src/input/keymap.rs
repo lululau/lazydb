@@ -4373,5 +4373,9 @@ mod tests {
             keymap.map(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE), &app),
             Some(Action::CycleSelectedColumnSort)
         );
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE), &app),
+            Some(Action::FilterGridCellByValue)
+        );
     }
 }

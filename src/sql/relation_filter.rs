@@ -113,7 +113,7 @@ pub fn cell_where_clause(
         CellValue::Float(inner) if inner.is_finite() => value.clipboard_text(),
         CellValue::Float(_) => {
             return Err(RelationFilterError(
-                "non-finite float values have no portable SQL literal".into(),
+                "Non-finite float values have no portable SQL literal".into(),
             ));
         }
         CellValue::Text(inner) => string_literal(inner, dialect),
@@ -124,7 +124,7 @@ pub fn cell_where_clause(
         | CellValue::Timestamp(_) => string_literal(&value.clipboard_text(), dialect),
         CellValue::Unsupported { type_name, .. } => {
             return Err(RelationFilterError(format!(
-                "values of type `{type_name}` cannot be filtered"
+                "Values of type `{type_name}` cannot be filtered"
             )));
         }
     };
