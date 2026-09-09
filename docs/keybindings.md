@@ -188,7 +188,7 @@ not expose every session. Filtering applies to the bounded visible snapshot.
 | `Enter` | Open/activate selected node |
 | `/` | Open visible-node find |
 | `f` | Open catalog search |
-| `n/N` | Next/previous confirmed find/search match |
+| `n/N` | Next/previous confirmed find match |
 | `n` | New profile |
 | `e` | Edit selected profile |
 | `a` | Add a supported object when the selected PostgreSQL node has a create option |
@@ -204,8 +204,8 @@ not expose every session. Filtering applies to the bounded visible snapshot.
 Visible-node find is Editing until Enter. While Editing, printable keys,
 Backspace, Ctrl-U, Enter, and Esc belong to find input. After confirmation,
 `n`, `N`, and Esc cycle or close it. Catalog search Editing accepts text,
-Backspace, Ctrl-U, navigation, Enter to locate, and Esc; after confirmation,
-`n`, `N`, and Esc are the active controls.
+Backspace, Ctrl-U, arrow-key selection, Ctrl-N/Ctrl-P to jump between
+matches, Enter to locate, and Esc.
 
 The Explorer `a` and catalog-object `e` rows are capability-aware. They are
 not shown for unsupported drivers, synthetic/status rows, or objects without
