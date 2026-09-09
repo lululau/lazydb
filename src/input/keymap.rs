@@ -644,6 +644,12 @@ impl Keymap {
                 if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('u') {
                     return Some(Action::ExplorerSearchClear);
                 }
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('n') {
+                    return Some(Action::ExplorerSearchNext);
+                }
+                if event.modifiers == KeyModifiers::CONTROL && event.code == KeyCode::Char('p') {
+                    return Some(Action::ExplorerSearchPrevious);
+                }
                 if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
                     return None;
                 }
@@ -3783,6 +3789,25 @@ mod tests {
         assert_eq!(
             keymap.map(key(KeyCode::End), &app),
             Some(Action::ExplorerSearchMove(isize::MAX))
+        );
+        assert_eq!(
+            keymap.map(control_key('n'), &app),
+            Some(Action::ExplorerSearchNext)
+        );
+        assert_eq!(
+            keymap.map(control_key('p'), &app),
+            Some(Action::ExplorerSearchPrevious)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('n')), &app),
+            Some(Action::ExplorerSearchInsert('n'))
+        );
+        assert_eq!(
+            keymap.map(
+                KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+                &app
+            ),
+            Some(Action::ExplorerSearchInsert('N'))
         );
         assert_eq!(
             keymap.map(key(KeyCode::Char('r')), &app),
