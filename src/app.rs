@@ -453,6 +453,19 @@ enum DataGridQueryContextFailure {
     AmbiguousColumns,
 }
 
+impl DataGridQueryContextFailure {
+    fn message(&self) -> &'static str {
+        match self {
+            DataGridQueryContextFailure::Unavailable => "No data query is available here",
+            DataGridQueryContextFailure::Loading => "Data is still loading",
+            DataGridQueryContextFailure::NoSucceededExecution => "Run a query successfully first",
+            DataGridQueryContextFailure::AmbiguousColumns => {
+                "Result column names are ambiguous; use unique aliases"
+            }
+        }
+    }
+}
+
 impl App {
     pub fn is_editor_target_switch_pending(&self) -> bool {
         self.pending_editor_target_switch.is_some()
@@ -2207,6 +2220,8 @@ impl App {
                         | Action::RelationQueryClear
                         | Action::SubmitRelationQuery
                         | Action::CycleDataColumnSort(_)
+                        | Action::CycleSelectedColumnSort
+                        | Action::FilterGridCellByValue
                         | Action::CancelRelationQueryInput
                         | Action::RelationEditCell
                         | Action::RelationEditBooleanMove(_)
@@ -2360,6 +2375,8 @@ impl App {
                     | Action::GridResizeColumn(_)
                     | Action::GridResetColumnWidth
                     | Action::CycleDataColumnSort(_)
+                    | Action::CycleSelectedColumnSort
+                    | Action::FilterGridCellByValue
                     | Action::GridStartColumnResize { .. }
                     | Action::GridSetColumnWidth { .. }
                     | Action::GridEndColumnResize
@@ -8266,6 +8283,22 @@ impl App {
             Action::RelationQueryClear => self.update(Action::DataQueryClear),
             Action::CancelRelationQueryInput => self.update(Action::CancelDataQueryInput),
             Action::SubmitRelationQuery => self.update(Action::SubmitDataQuery),
+            Action::CycleSelectedColumnSort => {
+                let (_, columns, _) = match self.data_grid_query_context() {
+                    Ok(context) => context,
+                    Err(DataGridQueryContextFailure::Unavailable) => return Vec::new(),
+                    Err(failure) => {
+                        self.notify_warning("Sort", failure.message());
+                        return Vec::new();
+                    }
+                };
+                let column = self.active_grid_column();
+                if column >= columns.len() {
+                    return Vec::new();
+                }
+                self.update(Action::CycleDataColumnSort(column))
+            }
+            Action::FilterGridCellByValue => Vec::new(),
             Action::CycleDataColumnSort(column) => {
                 let Ok((order_by, columns, dialect)) = self.data_grid_query_context() else {
                     return Vec::new();
@@ -10246,18 +10279,6 @@ impl App {
                 ))
             }
             _ => Err(DataGridQueryContextFailure::Unavailable),
-        }
-    }
-
-    #[allow(dead_code)] // used by Tasks 3-4 (keyboard sort/filter actions)
-    fn data_query_failure_message(failure: &DataGridQueryContextFailure) -> &'static str {
-        match failure {
-            DataGridQueryContextFailure::Unavailable => "No data query is available here",
-            DataGridQueryContextFailure::Loading => "Data is still loading",
-            DataGridQueryContextFailure::NoSucceededExecution => "Run a query successfully first",
-            DataGridQueryContextFailure::AmbiguousColumns => {
-                "Result column names are ambiguous; use unique aliases"
-            }
         }
     }
 
@@ -18314,6 +18335,94 @@ mod tests {
             }] if where_clause == "id > 0"
                 && order_by_clause == "\"id\" DESC"
                 && page.offset == 0
+        ));
+    }
+
+    #[test]
+    fn selected_column_sort_cycles_from_cursor_column() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id, name FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("one".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+            },
+        });
+        app.active_console_mut().query.where_input.set("id > 0");
+
+        let commands = app.update(Action::CycleSelectedColumnSort);
+
+        assert_eq!(
+            app.active_console().query.order_by_input.value(),
+            "\"id\" DESC"
+        );
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RunDerivedQueryPage {
+                where_clause,
+                order_by_clause,
+                page,
+                ..
+            }] if where_clause == "id > 0"
+                && order_by_clause == "\"id\" DESC"
+                && page.offset == 0
+        ));
+    }
+
+    #[test]
+    fn selected_column_sort_uses_cursor_column_not_first_column() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id, name FROM users");
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("one".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::ZERO, Duration::ZERO, 1),
+            },
+        });
+        app.active_console_mut().grid.selected_column = 1;
+
+        let commands = app.update(Action::CycleSelectedColumnSort);
+
+        assert_eq!(
+            app.active_console().query.order_by_input.value(),
+            "\"name\" DESC"
+        );
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::RunDerivedQueryPage { order_by_clause, .. }]
+                if order_by_clause == "\"name\" DESC"
         ));
     }
 

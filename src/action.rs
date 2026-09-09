@@ -627,6 +627,8 @@ pub enum Action {
     SubmitRelationQuery,
     CancelRelationQueryInput,
     CycleDataColumnSort(usize),
+    CycleSelectedColumnSort,
+    FilterGridCellByValue,
     ResizeRelationColumn(i16),
     ResetRelationColumnWidth,
     StartRelationColumnResize {

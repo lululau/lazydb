@@ -3194,6 +3194,8 @@ fn map_data_query(event: KeyEvent, app: &App) -> Option<Action> {
             KeyCode::Char('s') => Some(Action::FocusDataQueryInput(
                 crate::model::data_query::DataQueryInput::OrderBy,
             )),
+            KeyCode::Char('F') => Some(Action::FilterGridCellByValue),
+            KeyCode::Char('O') => Some(Action::CycleSelectedColumnSort),
             _ => None,
         };
     }
@@ -4355,6 +4357,21 @@ mod tests {
         assert_eq!(
             Keymap::default().map(key(KeyCode::Char('r')), &app),
             Some(Action::DashboardRefresh)
+        );
+    }
+
+    #[test]
+    fn results_sort_and_filter_keys_map_from_relation_data() {
+        let mut app = App::new(Vec::new());
+        let tab = RelationTab::new("users");
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE), &app),
+            Some(Action::CycleSelectedColumnSort)
         );
     }
 }
