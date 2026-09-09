@@ -446,6 +446,13 @@ enum CompletionAfterEdit {
     Suppress,
 }
 
+enum DataGridQueryContextFailure {
+    Unavailable,
+    Loading,
+    NoSucceededExecution,
+    AmbiguousColumns,
+}
+
 impl App {
     pub fn is_editor_target_switch_pending(&self) -> bool {
         self.pending_editor_target_switch.is_some()
@@ -8260,56 +8267,7 @@ impl App {
             Action::CancelRelationQueryInput => self.update(Action::CancelDataQueryInput),
             Action::SubmitRelationQuery => self.update(Action::SubmitDataQuery),
             Action::CycleDataColumnSort(column) => {
-                let Some((order_by, columns, dialect)) =
-                    self.tabs.get(self.active_tab).and_then(|tab| match tab {
-                        WorkspaceTab::Relation(tab) if tab.view == RelationView::Data => {
-                            if matches!(tab.data, RelationLoad::Loading { .. }) {
-                                return None;
-                            }
-                            Some((
-                                tab.query.order_by_input.value().to_owned(),
-                                self.relation_result()?.columns,
-                                self.sql_dialect(),
-                            ))
-                        }
-                        WorkspaceTab::Sql(tab)
-                            if tab.result_view == ResultView::Data
-                                && matches!(tab.query.capability, DataQueryCapability::Sql) =>
-                        {
-                            if tab.query_status == QueryStatus::Running
-                                || tab.derived.as_ref().is_some_and(|derived| derived.running)
-                            {
-                                return None;
-                            }
-                            let last = tab
-                                .last_execution
-                                .as_ref()
-                                .filter(|last| last.result == ExecutionResult::Succeeded)?;
-                            let result = tab
-                                .derived
-                                .as_ref()
-                                .and_then(|derived| derived.outcome.as_ref())
-                                .or(tab.outcome.as_ref())
-                                .and_then(|outcome| outcome.result_sets.last())?;
-                            if result
-                                .columns
-                                .iter()
-                                .map(|column| column.name.to_lowercase())
-                                .collect::<HashSet<_>>()
-                                .len()
-                                != result.columns.len()
-                            {
-                                return None;
-                            }
-                            Some((
-                                tab.query.order_by_input.value().to_owned(),
-                                result.columns.clone(),
-                                last.draft.dialect,
-                            ))
-                        }
-                        _ => None,
-                    })
-                else {
+                let Ok((order_by, columns, dialect)) = self.data_grid_query_context() else {
                     return Vec::new();
                 };
                 let column_names = columns
@@ -10226,6 +10184,80 @@ impl App {
                 }
             }
             Action::ToggleTerminalSelection => Vec::new(),
+        }
+    }
+
+    fn data_grid_query_context(
+        &self,
+    ) -> Result<(String, Vec<ColumnMeta>, SqlDialect), DataGridQueryContextFailure> {
+        let Self {
+            tabs, active_tab, ..
+        } = self;
+        match tabs.get(*active_tab) {
+            Some(WorkspaceTab::Relation(tab)) if tab.view == RelationView::Data => {
+                if matches!(tab.data, RelationLoad::Loading { .. }) {
+                    return Err(DataGridQueryContextFailure::Loading);
+                }
+                let columns = self
+                    .relation_result()
+                    .ok_or(DataGridQueryContextFailure::Unavailable)?
+                    .columns;
+                Ok((
+                    tab.query.order_by_input.value().to_owned(),
+                    columns,
+                    self.sql_dialect(),
+                ))
+            }
+            Some(WorkspaceTab::Sql(tab))
+                if tab.result_view == ResultView::Data
+                    && matches!(tab.query.capability, DataQueryCapability::Sql) =>
+            {
+                if tab.query_status == QueryStatus::Running
+                    || tab.derived.as_ref().is_some_and(|derived| derived.running)
+                {
+                    return Err(DataGridQueryContextFailure::Loading);
+                }
+                let last = tab
+                    .last_execution
+                    .as_ref()
+                    .filter(|last| last.result == ExecutionResult::Succeeded)
+                    .ok_or(DataGridQueryContextFailure::NoSucceededExecution)?;
+                let result = tab
+                    .derived
+                    .as_ref()
+                    .and_then(|derived| derived.outcome.as_ref())
+                    .or(tab.outcome.as_ref())
+                    .and_then(|outcome| outcome.result_sets.last())
+                    .ok_or(DataGridQueryContextFailure::NoSucceededExecution)?;
+                if result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.to_lowercase())
+                    .collect::<HashSet<_>>()
+                    .len()
+                    != result.columns.len()
+                {
+                    return Err(DataGridQueryContextFailure::AmbiguousColumns);
+                }
+                Ok((
+                    tab.query.order_by_input.value().to_owned(),
+                    result.columns.clone(),
+                    last.draft.dialect,
+                ))
+            }
+            _ => Err(DataGridQueryContextFailure::Unavailable),
+        }
+    }
+
+    #[allow(dead_code)] // used by Tasks 3-4 (keyboard sort/filter actions)
+    fn data_query_failure_message(failure: &DataGridQueryContextFailure) -> &'static str {
+        match failure {
+            DataGridQueryContextFailure::Unavailable => "No data query is available here",
+            DataGridQueryContextFailure::Loading => "Data is still loading",
+            DataGridQueryContextFailure::NoSucceededExecution => "Run a query successfully first",
+            DataGridQueryContextFailure::AmbiguousColumns => {
+                "Result column names are ambiguous; use unique aliases"
+            }
         }
     }
 
