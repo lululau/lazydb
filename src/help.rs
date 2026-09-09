@@ -1878,24 +1878,24 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         display
     ),
     row!(
-        ExplorerSearchLocate,
-        [ExplorerCatalogSearchEditing],
-        "Enter",
-        "locate selected result",
-        display
-    ),
-    row!(
         ExplorerSearchNext,
-        [ExplorerCatalogSearchConfirmed],
-        "n",
+        [ExplorerCatalogSearchEditing],
+        "Ctrl-n",
         "next match",
         display
     ),
     row!(
         ExplorerSearchPrevious,
-        [ExplorerCatalogSearchConfirmed],
-        "N",
+        [ExplorerCatalogSearchEditing],
+        "Ctrl-p",
         "previous match",
+        display
+    ),
+    row!(
+        ExplorerSearchLocate,
+        [ExplorerCatalogSearchEditing],
+        "Enter",
+        "locate selected result",
         display
     ),
     row!(
@@ -3395,6 +3395,11 @@ mod tests {
     #[test]
     fn every_task_one_context_has_basic_rows() {
         for context in ALL_SHORTCUT_CONTEXTS {
+            // Catalog search never reaches Confirmed (Enter locates and closes),
+            // so that context is intentionally rowless.
+            if matches!(context, ShortcutContext::ExplorerCatalogSearchConfirmed) {
+                continue;
+            }
             let capabilities = ShortcutCapabilities::relation_data();
             assert!(
                 !shortcuts(*context, capabilities).is_empty(),
@@ -3877,6 +3882,11 @@ mod tests {
     #[test]
     fn task_eight_contexts_have_at_least_one_real_control_row() {
         for context in ALL_SHORTCUT_CONTEXTS {
+            // Catalog search never reaches Confirmed (Enter locates and closes),
+            // so that context is intentionally rowless.
+            if matches!(context, ShortcutContext::ExplorerCatalogSearchConfirmed) {
+                continue;
+            }
             assert!(
                 !shortcuts(*context, ShortcutCapabilities::relation_data()).is_empty(),
                 "context lacks a catalog row: {context:?}"
@@ -4304,11 +4314,7 @@ mod tests {
             (ShortcutContext::ExplorerFindConfirmed, vec!["n", "N"]),
             (
                 ShortcutContext::ExplorerCatalogSearchEditing,
-                vec!["type / Backspace", "Enter"],
-            ),
-            (
-                ShortcutContext::ExplorerCatalogSearchConfirmed,
-                vec!["n", "N"],
+                vec!["type / Backspace", "Ctrl-n", "Ctrl-p", "Enter"],
             ),
             (
                 ShortcutContext::ProfileManagerForm,
