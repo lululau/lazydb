@@ -2601,6 +2601,9 @@ fn sql_results_ys_and_yj_use_grid_yank_prefix() {
 
     assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
     assert_eq!(keymap.map(key(KeyCode::Char('q')), &app), None);
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
 }
 
 #[test]
