@@ -2625,7 +2625,9 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
         };
     }
 
-    if !event.modifiers.is_empty() {
+    // Terminals deliver uppercase letters with SHIFT, so let them reach the
+    // per-mode matching below; only combined modifiers are intercepted here.
+    if !event.modifiers.is_empty() && event.modifiers != KeyModifiers::SHIFT {
         return match (event.modifiers, event.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('s')) => Some(Action::OpenTransactionControl),
             (KeyModifiers::CONTROL, KeyCode::Char('r')) => Some(Action::RelationRedo),
@@ -4138,6 +4140,24 @@ mod tests {
                 &app,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn relation_data_visual_line_accepts_terminal_shift_v() {
+        // Terminals deliver uppercase letters with SHIFT; the plain-`V` maps
+        // above only cover the synthetic no-modifier shape.
+        let app = relation_app(RelationGridMode::Browse);
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app),
+            Some(Action::RelationVisualLine)
+        );
+
+        let app = relation_app(RelationGridMode::VisualLine { anchor: 1 });
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app),
+            Some(Action::RelationEditCancel)
         );
     }
 
