@@ -107,6 +107,42 @@ pub fn copy_row_tsv(
     })
 }
 
+pub fn copy_row_json(
+    columns: &[ColumnMeta],
+    row: &[CellValue],
+) -> Option<ClipboardPayload> {
+    if columns.is_empty() {
+        return None;
+    }
+    // Serialize in column order. serde_json::Map sorts keys unless the
+    // preserve_order feature is enabled, which this crate does not use.
+    let mut parts = Vec::with_capacity(columns.len());
+    for (index, column) in columns.iter().enumerate() {
+        let value = row.get(index).unwrap_or(&CellValue::Null);
+        parts.push(format!(
+            "{}:{}",
+            serde_json::Value::String(column.name.clone()),
+            cell_json_value(value)
+        ));
+    }
+    Some(ClipboardPayload {
+        text: format!("{{{}}}", parts.join(",")),
+        description: format!("row: {} columns as JSON", columns.len()),
+        sensitive: false,
+    })
+}
+
+fn cell_json_value(value: &CellValue) -> serde_json::Value {
+    match value {
+        CellValue::Null => serde_json::Value::Null,
+        CellValue::Boolean(inner) => serde_json::Value::Bool(*inner),
+        CellValue::Integer(inner) => serde_json::json!(*inner),
+        CellValue::Unsigned(inner) => serde_json::json!(*inner),
+        CellValue::Float(inner) if inner.is_finite() => serde_json::json!(*inner),
+        other => serde_json::Value::String(other.clipboard_text()),
+    }
+}
+
 fn escape_tsv(value: String) -> String {
     if value
         .chars()
@@ -128,7 +164,9 @@ impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ClipboardPayload, Osc52Error, copy_cell, copy_row_tsv, osc52_sequence};
+    use super::{
+        ClipboardPayload, Osc52Error, copy_cell, copy_row_json, copy_row_tsv, osc52_sequence,
+    };
     use crate::db::{query::ColumnMeta, value::CellValue};
 
     #[test]
@@ -203,5 +241,67 @@ mod tests {
                 max_bytes: 4
             })
         );
+    }
+
+    #[test]
+    fn json_copies_one_object_with_typed_values() {
+        let columns = vec![
+            ColumnMeta {
+                name: "id".into(),
+                type_name: "INT".into(),
+            },
+            ColumnMeta {
+                name: "name".into(),
+                type_name: "TEXT".into(),
+            },
+            ColumnMeta {
+                name: "note".into(),
+                type_name: "TEXT".into(),
+            },
+            ColumnMeta {
+                name: "flag".into(),
+                type_name: "BOOL".into(),
+            },
+        ];
+        let row = vec![
+            CellValue::Integer(1),
+            CellValue::Text("Ada".into()),
+            CellValue::Null,
+            CellValue::Boolean(true),
+        ];
+        let payload = copy_row_json(&columns, &row).unwrap();
+        assert_eq!(payload.text, r#"{"id":1,"name":"Ada","note":null,"flag":true}"#);
+        assert_eq!(payload.description, "row: 4 columns as JSON");
+        assert!(!payload.sensitive);
+    }
+
+    #[test]
+    fn json_returns_none_for_empty_columns() {
+        assert!(copy_row_json(&[], &[]).is_none());
+    }
+
+    #[test]
+    fn json_stringifies_non_finite_floats_and_bytes() {
+        let columns = vec![
+            ColumnMeta {
+                name: "n".into(),
+                type_name: "FLOAT".into(),
+            },
+            ColumnMeta {
+                name: "blob".into(),
+                type_name: "BYTEA".into(),
+            },
+        ];
+        let row = vec![
+            CellValue::Float(f64::INFINITY),
+            CellValue::Bytes(vec![0x01, 0xFF]),
+        ];
+        let payload = copy_row_json(&columns, &row).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload.text).unwrap();
+        assert_eq!(
+            value["n"],
+            serde_json::Value::String(CellValue::Float(f64::INFINITY).clipboard_text())
+        );
+        assert_eq!(value["blob"], serde_json::Value::String("0x01FF".into()));
     }
 }
