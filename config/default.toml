@@ -135,8 +135,12 @@ move-up = ["k"]
 move-right = ["l"]
 # v opens Record View.
 open-record = ["v"]
-# y copies the selected cell.
-copy-cell = ["y"]
+# y s copies the selected cell.
+copy-cell = ["y s"]
+# y j copies the selected row as JSON.
+copy-row-json = ["y j"]
+# y q copies the selected row as INSERT SQL (Relation Data).
+copy-row-insert-sql = ["y q"]
 # Y copies the selected row.
 copy-row = ["Y"]
 # Space-Y copies the selected row including column headers.
