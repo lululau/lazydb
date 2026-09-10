@@ -106,7 +106,8 @@ pub fn relation_columns_sql(generation_expression: bool) -> &'static str {
 
 const PROBE_SQL: &str = "SELECT VERSION() AS version, DATABASE() AS current_database";
 
-pub const CATALOG_PAGE_BEGIN_SQL: &str = crate::db::mysql_version::CATALOG_BEGIN_SNAPSHOT_READ_ONLY;
+pub const CATALOG_PAGE_BEGIN_SQL: &str =
+    crate::db::mysql_version::CATALOG_BEGIN_SNAPSHOT_READ_ONLY;
 
 pub const CATALOG_SEARCH_CANDIDATES_SQL: &str = r#"
 WITH candidates AS (
@@ -383,8 +384,11 @@ fn candidate_search_haystacks(candidate: &MySqlSearchCandidate) -> [String; 2] {
     let path = match candidate.kind {
         CatalogKind::Database | CatalogKind::Schema => candidate.database.to_ascii_lowercase(),
         _ if candidate.kind.is_relation_child() => match &candidate.relation_name {
-            Some(relation) => format!("{}.{}.{}", candidate.database, relation, candidate.name)
-                .to_ascii_lowercase(),
+            Some(relation) => format!(
+                "{}.{}.{}",
+                candidate.database, relation, candidate.name
+            )
+            .to_ascii_lowercase(),
             None => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
         },
         _ => format!("{}.{}", candidate.database, candidate.name).to_ascii_lowercase(),
@@ -450,7 +454,9 @@ fn rank_legacy_search_candidates(
             let right_path = candidate_search_haystacks(right)[1].clone();
             left_path
                 .cmp(&right_path)
-                .then_with(|| search_kind_sort_key(left.kind).cmp(search_kind_sort_key(right.kind)))
+                .then_with(|| {
+                    search_kind_sort_key(left.kind).cmp(search_kind_sort_key(right.kind))
+                })
                 .then_with(|| left.native_identity.cmp(&right.native_identity))
         })
     });
@@ -1684,15 +1690,16 @@ impl MySqlAdapter {
             let extra: String = row.try_get(6).map_err(decode_error)?;
             // With generation_expression: indexes 7..13 are expression, precision..comment.
             // Without it: indexes 7..12 are precision..comment (shifted −1).
-            let (generation_expression, precision_idx, comment_idx) = if has_generation_expression {
-                (
-                    row.try_get::<String, _>(7).map_err(decode_error)?,
-                    8usize,
-                    13usize,
-                )
-            } else {
-                (String::new(), 7usize, 12usize)
-            };
+            let (generation_expression, precision_idx, comment_idx) =
+                if has_generation_expression {
+                    (
+                        row.try_get::<String, _>(7).map_err(decode_error)?,
+                        8usize,
+                        13usize,
+                    )
+                } else {
+                    (String::new(), 7usize, 12usize)
+                };
             let generated = !generation_expression.is_empty()
                 || extra.to_ascii_uppercase().contains("VIRTUAL GENERATED")
                 || extra.to_ascii_uppercase().contains("STORED GENERATED");
@@ -1738,10 +1745,12 @@ impl MySqlAdapter {
                     .map(non_negative_count)
                     .transpose()?,
             );
-            metadata.collation =
-                OptionalMetadata::Supported(row.try_get(precision_idx + 3).map_err(decode_error)?);
-            metadata.character_set =
-                OptionalMetadata::Supported(row.try_get(precision_idx + 4).map_err(decode_error)?);
+            metadata.collation = OptionalMetadata::Supported(
+                row.try_get(precision_idx + 3).map_err(decode_error)?,
+            );
+            metadata.character_set = OptionalMetadata::Supported(
+                row.try_get(precision_idx + 4).map_err(decode_error)?,
+            );
             metadata.constraint_memberships = memberships.remove(&name).unwrap_or_default();
             metadata.constraint_memberships.sort_by(|left, right| {
                 catalog_kind_rank(left.constraint_id.kind)
@@ -2137,12 +2146,14 @@ impl MySqlAdapter {
         relation: &str,
         capabilities: &MySqlCatalogCapabilities,
     ) -> Result<Vec<MySqlIndexInfo>, DatabaseError> {
-        let rows = sqlx::query(catalog_page_indexes_sql(capabilities.statistics_expression))
-            .bind(database)
-            .bind(relation)
-            .fetch_all(&mut *connection)
-            .await
-            .map_err(sql_error)?;
+        let rows = sqlx::query(catalog_page_indexes_sql(
+            capabilities.statistics_expression,
+        ))
+        .bind(database)
+        .bind(relation)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
         let parts = rows
             .into_iter()
             .map(|row| {
@@ -3415,8 +3426,7 @@ fn unsupported_catalog_version(version: &str) -> DatabaseError {
 }
 
 fn catalog_capabilities(version: &str) -> Result<MySqlCatalogCapabilities, DatabaseError> {
-    let info =
-        MySqlServerInfo::parse(version).ok_or_else(|| unsupported_catalog_version(version))?;
+    let info = MySqlServerInfo::parse(version).ok_or_else(|| unsupported_catalog_version(version))?;
     if !info.supports_catalog() {
         return Err(unsupported_catalog_version(version));
     }
@@ -3691,14 +3701,16 @@ mod tests {
         let candidate = search_candidate(CatalogKind::Table, "app", "foo_bar", Some("foo_bar"));
         assert_eq!(legacy_search_rank(&candidate, "foobar"), Some(0));
 
-        let ranked = rank_legacy_search_candidates(vec![candidate], "foo-bar");
+        let ranked =
+            rank_legacy_search_candidates(vec![candidate], "foo-bar");
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].name, "foo_bar");
     }
 
     #[test]
     fn legacy_search_rank_matches_column_via_relation_qualified_path() {
-        let candidate = search_candidate(CatalogKind::Column, "app", "amount", Some("orders"));
+        let candidate =
+            search_candidate(CatalogKind::Column, "app", "amount", Some("orders"));
         let [name, path] = candidate_search_haystacks(&candidate);
         assert_eq!(name, "amount");
         assert_eq!(path, "app.orders.amount");
