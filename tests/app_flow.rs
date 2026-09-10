@@ -1251,3 +1251,71 @@ fn ex_quit_is_reduced_by_app_not_called_directly() {
             .any(|command| matches!(command, lazydb::action::Command::FlushWorkspace { .. }))
     );
 }
+
+#[test]
+fn sql_results_visual_selection_copies_column_json_and_insert_sql() {
+    use lazydb::db::{
+        query::{ColumnMeta, QueryOutcome, QueryStats, ResultSet},
+        value::CellValue,
+    };
+    use lazydb::model::tab::ResultView;
+    use lazydb::model::workspace::Focus;
+
+    let mut app = App::new(Vec::new());
+    app.active_console_mut().outcome = Some(QueryOutcome {
+        result_sets: vec![ResultSet {
+            columns: vec![
+                ColumnMeta {
+                    name: "id".into(),
+                    type_name: "INT".into(),
+                },
+                ColumnMeta {
+                    name: "name".into(),
+                    type_name: "TEXT".into(),
+                },
+            ],
+            rows: vec![
+                vec![CellValue::Integer(1), CellValue::Text("Ada".into())],
+                vec![CellValue::Integer(2), CellValue::Text("Bob".into())],
+                vec![CellValue::Integer(3), CellValue::Text("Eve".into())],
+            ],
+            affected_rows: 0,
+        }],
+        stats: QueryStats::new(Duration::from_millis(1), Duration::from_millis(1), 0),
+    });
+    app.focus = Focus::Results;
+    app.active_console_mut().result_view = ResultView::Data;
+    app.active_console_mut().grid.selected_row = 2;
+    app.active_console_mut().grid.selected_column = 1;
+    app.update(Action::ResultsVisualLine);
+    assert_eq!(app.active_console().visual_anchor, Some(2));
+
+    // Anchor moves above the cursor once the selection is extended upwards.
+    app.active_console_mut().grid.selected_row = 0;
+
+    let commands = app.update(Action::CopyGridSelectionColumn);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload.text == "Ada\nBob\nEve"
+    ));
+
+    let commands = app.update(Action::CopyGridSelectionJson);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload.text
+            == r#"[{"id":1,"name":"Ada"},{"id":2,"name":"Bob"},{"id":3,"name":"Eve"}]"#
+    ));
+
+    let commands = app.update(Action::CopyGridSelectionInsertSql);
+    assert!(matches!(
+        commands.as_slice(),
+        [Command::WriteClipboard(payload)] if payload.text == "\
+    INSERT INTO \"table_name\" (\"id\", \"name\") VALUES (1, 'Ada');\n\
+    INSERT INTO \"table_name\" (\"id\", \"name\") VALUES (2, 'Bob');\n\
+    INSERT INTO \"table_name\" (\"id\", \"name\") VALUES (3, 'Eve');"
+    ));
+
+    app.update(Action::ResultsVisualCancel);
+    assert_eq!(app.active_console().visual_anchor, None);
+    assert!(app.update(Action::CopyGridSelectionJson).is_empty());
+}

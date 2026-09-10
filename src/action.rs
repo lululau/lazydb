@@ -474,6 +474,8 @@ pub enum Action {
     CopyGridSelectionColumn,
     CopyGridSelectionJson,
     CopyGridSelectionInsertSql,
+    ResultsVisualLine,
+    ResultsVisualCancel,
     ViewGridCell,
     CopyRecordViewCell,
     CopyRecordViewRow {

@@ -1232,36 +1232,55 @@ impl App {
     }
 
     fn active_visual_selection_snapshot(&self) -> Option<(Vec<ColumnMeta>, Vec<Vec<CellValue>>)> {
-        let WorkspaceTab::Relation(tab) = self.tabs.get(self.active_tab)? else {
-            return None;
-        };
-        if tab.view != crate::model::relation::RelationView::Data {
-            return None;
+        match self.tabs.get(self.active_tab)? {
+            WorkspaceTab::Relation(tab) => {
+                if tab.view != crate::model::relation::RelationView::Data {
+                    return None;
+                }
+                let edit = tab.edit.as_ref()?;
+                let (start, end) = edit.visual_range(tab.grid.selected_row)?;
+                let result = match &tab.data {
+                    RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last(),
+                    RelationLoad::Loading { previous, .. }
+                    | RelationLoad::Failed { previous, .. }
+                    | RelationLoad::Cancelled { previous } => previous
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.value.result.result_sets.last()),
+                    RelationLoad::Empty => None,
+                }?;
+                let rows = (start..=end)
+                    .filter_map(|index| edit.rows.get(index))
+                    .map(|row| row.current.clone())
+                    .collect::<Vec<_>>();
+                Some((result.columns.clone(), rows))
+            }
+            WorkspaceTab::Sql(tab) => {
+                if tab.result_view != ResultView::Data {
+                    return None;
+                }
+                let anchor = tab.visual_anchor?;
+                let result = tab
+                    .derived
+                    .as_ref()
+                    .and_then(|derived| derived.outcome.as_ref())
+                    .or(tab.outcome.as_ref())
+                    .and_then(|outcome| outcome.result_sets.last())?;
+                let cursor = tab.grid.selected_row;
+                let (start, end) = (anchor.min(cursor), anchor.max(cursor));
+                let rows = result
+                    .rows
+                    .get(start..=end)
+                    .map(|slice| slice.to_vec())
+                    .unwrap_or_default();
+                Some((result.columns.clone(), rows))
+            }
+            _ => None,
         }
-        let edit = tab.edit.as_ref()?;
-        let (start, end) = edit.visual_range(tab.grid.selected_row)?;
-        let result = match &tab.data {
-            RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last(),
-            RelationLoad::Loading { previous, .. }
-            | RelationLoad::Failed { previous, .. }
-            | RelationLoad::Cancelled { previous } => previous
-                .as_ref()
-                .and_then(|snapshot| snapshot.value.result.result_sets.last()),
-            RelationLoad::Empty => None,
-        }?;
-        let rows = (start..=end)
-            .filter_map(|index| edit.rows.get(index))
-            .map(|row| row.current.clone())
-            .collect::<Vec<_>>();
-        Some((result.columns.clone(), rows))
     }
 
     fn copy_grid_selection_column(&mut self) -> Vec<Command> {
         let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
-            self.notify_warning(
-                "Clipboard",
-                "Column copy needs a row selection in Relation Data",
-            );
+            self.notify_warning("Clipboard", "Column copy needs a row selection");
             return Vec::new();
         };
         let column = self.active_grid_column();
@@ -1283,10 +1302,7 @@ impl App {
 
     fn copy_grid_selection_json(&mut self) -> Vec<Command> {
         let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
-            self.notify_warning(
-                "Clipboard",
-                "JSON copy needs a row selection in Relation Data",
-            );
+            self.notify_warning("Clipboard", "JSON copy needs a row selection");
             return Vec::new();
         };
         copy_rows_json(&columns, &rows)
@@ -1296,27 +1312,32 @@ impl App {
     }
 
     fn copy_grid_selection_insert_sql(&mut self) -> Vec<Command> {
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
-            self.notify_warning(
-                "Clipboard",
-                "INSERT SQL copy is only available in Relation Data",
-            );
-            return Vec::new();
-        };
-        if tab.view != crate::model::relation::RelationView::Data {
-            self.notify_warning(
-                "Clipboard",
-                "INSERT SQL copy is only available in Relation Data",
-            );
-            return Vec::new();
-        }
-        let qualified_name = tab.descriptor.qualified_name.clone();
         let dialect = self.sql_dialect();
+        let qualified_name = match self.tabs.get(self.active_tab) {
+            Some(WorkspaceTab::Relation(tab))
+                if tab.view == crate::model::relation::RelationView::Data =>
+            {
+                tab.descriptor.qualified_name.clone()
+            }
+            // Result sets come from arbitrary queries, so emit a placeholder
+            // table name the user can replace.
+            Some(WorkspaceTab::Sql(tab)) if tab.result_view == ResultView::Data => {
+                crate::db::catalog::QualifiedName {
+                    database: None,
+                    schema: None,
+                    object: "table_name".into(),
+                }
+            }
+            _ => {
+                self.notify_warning(
+                    "Clipboard",
+                    "INSERT SQL copy is only available in a Data view",
+                );
+                return Vec::new();
+            }
+        };
         let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
-            self.notify_warning(
-                "Clipboard",
-                "INSERT SQL copy needs a row selection in Relation Data",
-            );
+            self.notify_warning("Clipboard", "INSERT SQL copy needs a row selection");
             return Vec::new();
         };
         copy_rows_insert_sql(dialect, &qualified_name, &columns, &rows)
@@ -2228,6 +2249,11 @@ impl App {
             Id::RelationVisualCopyCell => vec![Action::CopyGridSelectionColumn],
             Id::RelationVisualCopyJson => vec![Action::CopyGridSelectionJson],
             Id::RelationVisualCopyInsertSql => vec![Action::CopyGridSelectionInsertSql],
+            Id::ResultsVisualLine => vec![Action::ResultsVisualLine],
+            Id::ResultsVisualCopyCell => vec![Action::CopyGridSelectionColumn],
+            Id::ResultsVisualCopyJson => vec![Action::CopyGridSelectionJson],
+            Id::ResultsVisualCopyInsertSql => vec![Action::CopyGridSelectionInsertSql],
+            Id::ResultsVisualCancel => vec![Action::ResultsVisualCancel],
             Id::ResultsCopyRow => vec![Action::CopyGridRow {
                 include_headers: false,
             }],
@@ -9224,6 +9250,7 @@ impl App {
                     tab.pagination = pagination;
                     tab.grid.selected_row = 0;
                     tab.grid.row_offset = 0;
+                    tab.visual_anchor = None;
                     if let crate::model::pagination::TotalRows::Exact(total) = previous_total {
                         tab.pagination.total = crate::model::pagination::TotalRows::Exact(total);
                     }
@@ -9334,6 +9361,7 @@ impl App {
                 }
                 tab.grid.selected_row = 0;
                 tab.grid.row_offset = 0;
+                tab.visual_anchor = None;
                 tab.query.error = None;
                 tab.result_view = ResultView::Data;
                 Vec::new()
@@ -9542,6 +9570,7 @@ impl App {
                         tab.pagination = pagination;
                         tab.grid.selected_row = 0;
                         tab.grid.row_offset = 0;
+                        tab.visual_anchor = None;
                         if let crate::model::pagination::TotalRows::Exact(total) = previous_total {
                             tab.pagination.total =
                                 crate::model::pagination::TotalRows::Exact(total);
@@ -10239,6 +10268,14 @@ impl App {
             }
             Action::RelationVisualLine => {
                 self.relation_visual_line();
+                Vec::new()
+            }
+            Action::ResultsVisualLine => {
+                self.results_visual_line();
+                Vec::new()
+            }
+            Action::ResultsVisualCancel => {
+                self.results_visual_cancel();
                 Vec::new()
             }
             Action::RelationDeleteCurrent => self.relation_delete_current(),
@@ -13381,6 +13418,7 @@ impl App {
         tab.pagination.total = crate::model::pagination::TotalRows::LowerBound(0);
         tab.grid.selected_row = 0;
         tab.grid.row_offset = 0;
+        tab.visual_anchor = None;
     }
 
     fn retain_execution(&mut self, draft: sql::ExecutionDraft, result: ExecutionResult) {
@@ -16508,6 +16546,20 @@ impl App {
         let row = self.active_grid_row();
         if let Some(edit) = self.relation_session_mut() {
             edit.mode = RelationGridMode::VisualLine { anchor: row };
+        }
+    }
+
+    fn results_visual_line(&mut self) {
+        if let Some(WorkspaceTab::Sql(tab)) = self.tabs.get_mut(self.active_tab)
+            && tab.result_view == ResultView::Data
+        {
+            tab.visual_anchor = Some(tab.grid.selected_row);
+        }
+    }
+
+    fn results_visual_cancel(&mut self) {
+        if let Some(WorkspaceTab::Sql(tab)) = self.tabs.get_mut(self.active_tab) {
+            tab.visual_anchor = None;
         }
     }
 

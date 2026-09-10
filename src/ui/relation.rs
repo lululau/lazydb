@@ -839,6 +839,7 @@ fn render_relation_result_table(
     let sort_projection =
         crate::sql::relation_column_sort_projection(order_by_clause, &column_names, dialect)
             .unwrap_or_else(|_| vec![None; column_names.len()]);
+    let visual_range = edit.and_then(|session| session.visual_range(grid.selected_row));
     super::data_grid::render(
         frame,
         area,
@@ -850,6 +851,7 @@ fn render_relation_result_table(
         block,
         state,
         edit,
+        visual_range,
         icons,
         Some(&sort_projection),
         true,

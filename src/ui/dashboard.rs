@@ -471,6 +471,7 @@ fn render_processes(
             .title("Process List"),
         state,
         None,
+        None,
         state.activity_icons,
         None,
         false,

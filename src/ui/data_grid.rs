@@ -44,6 +44,7 @@ pub(crate) fn render(
     block: Block<'_>,
     state: &mut UiState,
     edit: Option<&crate::model::relation_edit::RelationEditSession>,
+    visual_range: Option<(usize, usize)>,
     icons: IconSet,
     sort_projection: Option<&[Option<crate::sql::RelationColumnSort>]>,
     sort_interactive: bool,
@@ -202,9 +203,8 @@ pub(crate) fn render(
             }
             crate::model::relation_edit::EditableRowState::Clean => None,
         });
-        let visual_selected = edit
-            .and_then(|session| session.visual_range(grid.selected_row))
-            .is_some_and(|(start, end)| row_index >= start && row_index <= end);
+        let visual_selected =
+            visual_range.is_some_and(|(start, end)| row_index >= start && row_index <= end);
         // Deleted rows keep their marker even inside a visual selection.
         let row_style = if visual_selected
             && !editable.is_some_and(|row| {
@@ -830,6 +830,7 @@ mod tests {
                     Theme::deep_space(),
                     Block::default(),
                     &mut state,
+                    None,
                     None,
                     IconSet::new(IconMode::Ascii),
                     sort_projection,

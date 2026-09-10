@@ -2272,6 +2272,21 @@ fn map_pending(
         {
             Some(Action::RelationYankSelected)
         }
+        (Pending::GridYank, KeyCode::Char('s'))
+            if is_sql_grid_focus(app) && sql_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionColumn)
+        }
+        (Pending::GridYank, KeyCode::Char('j'))
+            if is_sql_grid_focus(app) && sql_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionJson)
+        }
+        (Pending::GridYank, KeyCode::Char('q'))
+            if is_sql_grid_focus(app) && sql_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionInsertSql)
+        }
         (Pending::GridYank, KeyCode::Char('s')) => Some(Action::CopyGridCell),
         (Pending::GridYank, KeyCode::Char('j')) => Some(Action::CopyGridRowJson),
         (Pending::GridYank, KeyCode::Char('q'))
@@ -2510,6 +2525,14 @@ fn is_sql_grid_focus(app: &App) -> bool {
             app.tabs.get(app.active_tab),
             Some(crate::model::tab::WorkspaceTab::Sql(tab))
                 if tab.result_view == crate::model::tab::ResultView::Data
+        )
+}
+
+fn sql_grid_is_visual(app: &App) -> bool {
+    is_sql_grid_focus(app)
+        && matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Sql(tab)) if tab.visual_anchor.is_some()
         )
 }
 
@@ -3090,8 +3113,15 @@ fn is_read_only_editor_key(event: KeyEvent) -> bool {
     }
 }
 
-fn map_results(code: KeyCode, _app: &App) -> Option<Action> {
+fn map_results(code: KeyCode, app: &App) -> Option<Action> {
     match code {
+        // map_results also serves relation DDL and dashboard grids via
+        // map_relation/focus fallbacks, so the visual arms stay scoped to the
+        // SQL results Data view.
+        KeyCode::Char('V') if is_sql_grid_focus(app) => Some(Action::ResultsVisualLine),
+        KeyCode::Esc | KeyCode::Char('q') if is_sql_grid_focus(app) && sql_grid_is_visual(app) => {
+            Some(Action::ResultsVisualCancel)
+        }
         KeyCode::Char('0' | '^') => Some(Action::GridSelectColumn(
             crate::model::tab::GridColumnTarget::First,
         )),
@@ -3146,7 +3176,7 @@ fn map_results(code: KeyCode, _app: &App) -> Option<Action> {
         KeyCode::Char('L') => Some(Action::GridSelectRow(
             crate::model::tab::GridRowTarget::ViewBottom,
         )),
-        KeyCode::Char('o') => match _app.tabs.get(_app.active_tab) {
+        KeyCode::Char('o') => match app.tabs.get(app.active_tab) {
             Some(crate::model::tab::WorkspaceTab::Relation(tab)) => {
                 Some(Action::SetRelationView(match tab.view {
                     crate::model::relation::RelationView::Data => {
@@ -3292,7 +3322,8 @@ mod tests {
             relation::RelationTab,
             relation_edit::{RelationEditSession, RelationGridMode},
             tab::{
-                GridColumnTarget, GridRowAlignment, GridRowTarget, GridScrollAmount, WorkspaceTab,
+                ConsoleTab, GridColumnTarget, GridRowAlignment, GridRowTarget, GridScrollAmount,
+                WorkspaceTab,
             },
             workspace::Focus,
             workspace::Overlay,
@@ -3307,6 +3338,17 @@ mod tests {
         edit.mode = mode;
         tab.edit = Some(edit);
         app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        app
+    }
+
+    fn sql_results_app(visual_anchor: Option<usize>) -> App {
+        let mut app = App::new(Vec::new());
+        let mut tab = ConsoleTab::new("query");
+        tab.result_view = crate::model::tab::ResultView::Data;
+        tab.visual_anchor = visual_anchor;
+        app.tabs.push(WorkspaceTab::Sql(tab));
         app.active_tab = 1;
         app.focus = Focus::Results;
         app
@@ -4208,6 +4250,46 @@ mod tests {
 
         for (suffix, action) in [
             (KeyCode::Char('y'), Action::RelationYankSelected),
+            (KeyCode::Char('s'), Action::CopyGridSelectionColumn),
+            (KeyCode::Char('j'), Action::CopyGridSelectionJson),
+            (KeyCode::Char('q'), Action::CopyGridSelectionInsertSql),
+        ] {
+            assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+            assert_eq!(keymap.map(key(suffix), &app), Some(action));
+        }
+    }
+
+    #[test]
+    fn sql_results_visual_line_enters_with_shift_v_and_leaves_with_esc_or_q() {
+        let app = sql_results_app(None);
+        let mut keymap = Keymap::default();
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app),
+            Some(Action::ResultsVisualLine)
+        );
+        // Plain q stays unmapped outside visual mode.
+        assert_eq!(keymap.map(key(KeyCode::Char('q')), &app), None);
+
+        let app = sql_results_app(Some(1));
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert_eq!(
+                keymap.map(key(code), &app),
+                Some(Action::ResultsVisualCancel)
+            );
+        }
+        // V re-anchors instead of leaving visual mode.
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app),
+            Some(Action::ResultsVisualLine)
+        );
+    }
+
+    #[test]
+    fn sql_results_visual_yank_prefix_targets_the_selection() {
+        let app = sql_results_app(Some(1));
+        let mut keymap = Keymap::default();
+
+        for (suffix, action) in [
             (KeyCode::Char('s'), Action::CopyGridSelectionColumn),
             (KeyCode::Char('j'), Action::CopyGridSelectionJson),
             (KeyCode::Char('q'), Action::CopyGridSelectionInsertSql),

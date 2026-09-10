@@ -3603,6 +3603,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
                 tab.id,
                 result,
                 tab.grid.clone(),
+                tab.visual_anchor,
                 theme,
                 Block::default().style(Style::new().bg(theme.surface)),
                 state,
@@ -3651,6 +3652,7 @@ fn render_data(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme, state
             tab.id,
             result,
             tab.grid.clone(),
+            tab.visual_anchor,
             theme,
             Block::default().style(Style::new().bg(theme.surface)),
             state,
@@ -3702,6 +3704,7 @@ pub(crate) fn render_result_table(
     tab_id: Uuid,
     result: &ResultSet,
     grid: crate::model::tab::GridState,
+    visual_anchor: Option<usize>,
     theme: Theme,
     block: Block<'_>,
     state: &mut UiState,
@@ -3721,6 +3724,10 @@ pub(crate) fn render_result_table(
         crate::sql::relation_column_sort_projection(order_by_clause, &column_names, dialect)
             .unwrap_or_else(|_| vec![None; column_names.len()]);
     let sort_interactive = sort_interactive && !tabular_column_names_ambiguous(&column_names);
+    let visual_range = visual_anchor.map(|anchor| {
+        let cursor = grid.selected_row;
+        (anchor.min(cursor), anchor.max(cursor))
+    });
     data_grid::render(
         frame,
         area,
@@ -3732,6 +3739,7 @@ pub(crate) fn render_result_table(
         block,
         state,
         None,
+        visual_range,
         icons,
         Some(&sort_projection),
         sort_interactive,

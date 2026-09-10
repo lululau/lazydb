@@ -23,6 +23,7 @@ pub enum ShortcutContext {
     EditorInsert,
     EditorVisual,
     SqlResultsData,
+    SqlResultsVisual,
     SqlOutput,
     Dashboard,
     RelationDataBrowse,
@@ -243,7 +244,13 @@ fn shortcut_context_with_overlay(app: &App, include_help: bool) -> ShortcutConte
             }
         }
         Some(WorkspaceTab::Sql(tab)) if app.focus == Focus::Results => match tab.result_view {
-            ResultView::Data => ShortcutContext::SqlResultsData,
+            ResultView::Data => {
+                if tab.visual_anchor.is_some() {
+                    ShortcutContext::SqlResultsVisual
+                } else {
+                    ShortcutContext::SqlResultsData
+                }
+            }
             ResultView::Output | ResultView::Plan => ShortcutContext::SqlOutput,
         },
         Some(WorkspaceTab::Dashboard(_)) if app.focus == Focus::Results => {
@@ -371,6 +378,12 @@ pub enum HelpShortcutId {
     ResultsCopyCell,
     ResultsCopyRowJson,
     RelationCopyRowInsertSql,
+    ResultsVisualLine,
+    ResultsVisualMove,
+    ResultsVisualCopyCell,
+    ResultsVisualCopyJson,
+    ResultsVisualCopyInsertSql,
+    ResultsVisualCancel,
     ResultsCopyRow,
     ResultsCopyRowWithHeaders,
     ResultsToggleView,
@@ -799,6 +812,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorInsert,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataEdit,
@@ -819,6 +833,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorInsert,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataEdit,
@@ -838,6 +853,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorInsert,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataEdit,
@@ -855,6 +871,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataVisual,
@@ -910,6 +927,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataVisual,
@@ -930,6 +948,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             Dashboard,
             RelationDataBrowse,
@@ -949,6 +968,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse
         ],
@@ -964,6 +984,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse
         ],
@@ -979,6 +1000,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -995,6 +1017,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1009,6 +1032,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [
             Explorer,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1023,6 +1047,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [
             Explorer,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl,
@@ -1051,6 +1076,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [
             Explorer,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1065,6 +1091,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [
             Explorer,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1089,6 +1116,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorVisual,
             DataQueryInput,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl,
@@ -1103,6 +1131,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             Explorer,
             EditorNormal,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1120,6 +1149,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorInsert,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDataEdit,
@@ -1361,6 +1391,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [
             Explorer,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1604,6 +1635,51 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         "y"
     ),
     row!(
+        ResultsVisualLine,
+        [SqlResultsData],
+        "V",
+        "select rows",
+        display
+    ),
+    row!(
+        ResultsVisualMove,
+        [SqlResultsVisual],
+        "j/k",
+        "extend selected rows",
+        display
+    ),
+    row!(
+        ResultsVisualCopyCell,
+        [SqlResultsVisual],
+        "ys",
+        "copy selected column cells",
+        GridYank,
+        "s"
+    ),
+    row!(
+        ResultsVisualCopyJson,
+        [SqlResultsVisual],
+        "yj",
+        "copy selected rows as JSON",
+        GridYank,
+        "j"
+    ),
+    row!(
+        ResultsVisualCopyInsertSql,
+        [SqlResultsVisual],
+        "yq",
+        "copy selected rows as INSERT SQL",
+        GridYank,
+        "q"
+    ),
+    row!(
+        ResultsVisualCancel,
+        [SqlResultsVisual],
+        "Esc/q",
+        "cancel row selection",
+        display
+    ),
+    row!(
         ResultsToggleView,
         [SqlResultsData, SqlOutput],
         "o",
@@ -1815,6 +1891,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1832,6 +1909,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1849,6 +1927,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1866,6 +1945,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -1883,6 +1963,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
             EditorNormal,
             EditorVisual,
             SqlResultsData,
+            SqlResultsVisual,
             SqlOutput,
             RelationDataBrowse,
             RelationDdl
@@ -3050,6 +3131,9 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::RelationVisualCopyCell => 6,
             Id::RelationVisualCopyJson => 7,
             Id::RelationVisualCopyInsertSql => 8,
+            Id::ResultsVisualCopyCell => 9,
+            Id::ResultsVisualCopyJson => 10,
+            Id::ResultsVisualCopyInsertSql => 11,
             _ => return None,
         },
         ShortcutPrefix::RelationDelete => match id {
@@ -3134,6 +3218,14 @@ fn footer_rank(
             Id::ResultsToggleView => Some(8),
             Id::DataQueryWhere => Some(9),
             Id::Help => Some(10),
+            _ => None,
+        },
+        ShortcutContext::SqlResultsVisual => match id {
+            Id::ResultsVisualMove => Some(1),
+            Id::ResultsVisualCopyCell => Some(2),
+            Id::ResultsVisualCopyJson => Some(3),
+            Id::ResultsVisualCopyInsertSql => Some(4),
+            Id::ResultsVisualCancel => Some(5),
             _ => None,
         },
         ShortcutContext::Dashboard => match id {
@@ -3270,6 +3362,7 @@ pub(crate) fn context_name(context: ShortcutContext) -> &'static str {
         | ShortcutContext::EditorInsert
         | ShortcutContext::EditorVisual => "EDITOR",
         ShortcutContext::SqlResultsData
+        | ShortcutContext::SqlResultsVisual
         | ShortcutContext::SqlOutput
         | ShortcutContext::RelationDataBrowse
         | ShortcutContext::RelationDataEdit
@@ -3748,6 +3841,10 @@ mod tests {
         app.active_console_mut().result_view = ResultView::Output;
         assert_eq!(shortcut_context(&app), ShortcutContext::SqlOutput);
         app.active_console_mut().result_view = ResultView::Data;
+        assert_eq!(shortcut_context(&app), ShortcutContext::SqlResultsData);
+        app.active_console_mut().visual_anchor = Some(0);
+        assert_eq!(shortcut_context(&app), ShortcutContext::SqlResultsVisual);
+        app.active_console_mut().visual_anchor = None;
         app.active_console_mut().query.focus = Some(DataQueryInput::Where);
         assert_eq!(shortcut_context(&app), ShortcutContext::DataQueryInput);
     }
@@ -4329,6 +4426,10 @@ mod tests {
         assert_eq!(
             footer_sequences(ShortcutContext::RelationDataVisual, editable),
             vec!["j/k", "yy", "d", "Esc/q"]
+        );
+        assert_eq!(
+            footer_sequences(ShortcutContext::SqlResultsVisual, editable),
+            vec!["j/k", "ys", "yj", "yq", "Esc/q"]
         );
 
         let read_only = ShortcutCapabilities {
