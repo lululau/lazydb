@@ -2622,10 +2622,7 @@ fn dashboard_processes_keeps_immediate_y_cell_copy() {
         Some(Action::CopyGridCell)
     );
     assert_eq!(
-        keymap.map(
-            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
-            &app
-        ),
+        keymap.map(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT), &app),
         Some(Action::CopyGridRow {
             include_headers: false,
         })
@@ -4030,19 +4027,37 @@ fn trigger_completion_triggers_in_sql_insert_mode_via_ctrl_space_and_alt_slash()
     let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
     let alt_slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT);
 
-    assert_eq!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
-    assert_eq!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+    assert_eq!(
+        keymap.map(ctrl_space, &app),
+        Some(Action::CompletionExplicit)
+    );
+    assert_eq!(
+        keymap.map(alt_slash, &app),
+        Some(Action::CompletionExplicit)
+    );
 
     // Normal mode should not trigger completion
     app.update(Action::EditorKey(key(KeyCode::Esc)));
     assert_eq!(app.active_editor_mode(), EditorMode::Normal);
-    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
-    assert_ne!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+    assert_ne!(
+        keymap.map(ctrl_space, &app),
+        Some(Action::CompletionExplicit)
+    );
+    assert_ne!(
+        keymap.map(alt_slash, &app),
+        Some(Action::CompletionExplicit)
+    );
 
     // Explorer focus should not trigger completion
     app.focus = Focus::Explorer;
-    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
-    assert_ne!(keymap.map(alt_slash, &app), Some(Action::CompletionExplicit));
+    assert_ne!(
+        keymap.map(ctrl_space, &app),
+        Some(Action::CompletionExplicit)
+    );
+    assert_ne!(
+        keymap.map(alt_slash, &app),
+        Some(Action::CompletionExplicit)
+    );
 }
 
 #[test]
@@ -4067,10 +4082,8 @@ fn custom_trigger_completion_keybindings_are_respected() {
     "#;
     let config = lazydb::config::AppConfig::from_toml(toml).unwrap();
     let bindings = config.keybindings.key_bindings().unwrap();
-    let mut keymap = Keymap::with_sequence_timeout_and_bindings(
-        std::time::Duration::from_millis(750),
-        bindings,
-    );
+    let mut keymap =
+        Keymap::with_sequence_timeout_and_bindings(std::time::Duration::from_millis(750), bindings);
 
     let app = App::new(Vec::new());
     assert_eq!(app.active_editor_mode(), EditorMode::Insert);
@@ -4079,6 +4092,8 @@ fn custom_trigger_completion_keybindings_are_respected() {
     let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
 
     assert_eq!(keymap.map(ctrl_k, &app), Some(Action::CompletionExplicit));
-    assert_ne!(keymap.map(ctrl_space, &app), Some(Action::CompletionExplicit));
+    assert_ne!(
+        keymap.map(ctrl_space, &app),
+        Some(Action::CompletionExplicit)
+    );
 }
-

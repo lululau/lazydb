@@ -110,10 +110,7 @@ pub fn copy_row_tsv(
     })
 }
 
-pub fn copy_row_json(
-    columns: &[ColumnMeta],
-    row: &[CellValue],
-) -> Option<ClipboardPayload> {
+pub fn copy_row_json(columns: &[ColumnMeta], row: &[CellValue]) -> Option<ClipboardPayload> {
     if columns.is_empty() {
         return None;
     }
@@ -153,9 +150,7 @@ pub fn copy_row_insert_sql(
     let values = columns
         .iter()
         .enumerate()
-        .map(|(index, _)| {
-            cell_sql_literal(row.get(index).unwrap_or(&CellValue::Null), dialect)
-        })
+        .map(|(index, _)| cell_sql_literal(row.get(index).unwrap_or(&CellValue::Null), dialect))
         .collect::<Vec<_>>()
         .join(", ");
     Some(ClipboardPayload {
@@ -316,7 +311,10 @@ mod tests {
             CellValue::Boolean(true),
         ];
         let payload = copy_row_json(&columns, &row).unwrap();
-        assert_eq!(payload.text, r#"{"id":1,"name":"Ada","note":null,"flag":true}"#);
+        assert_eq!(
+            payload.text,
+            r#"{"id":1,"name":"Ada","note":null,"flag":true}"#
+        );
         assert_eq!(payload.description, "row: 4 columns as JSON");
         assert!(!payload.sensitive);
     }
@@ -380,8 +378,7 @@ mod tests {
             schema: Some("public".into()),
             object: "users".into(),
         };
-        let payload =
-            copy_row_insert_sql(SqlDialect::Postgres, &name, &columns, &row).unwrap();
+        let payload = copy_row_insert_sql(SqlDialect::Postgres, &name, &columns, &row).unwrap();
         assert_eq!(
             payload.text,
             r#"INSERT INTO "public"."users" ("id", "name", "note") VALUES (1, 'O''Hara', NULL);"#
@@ -410,16 +407,18 @@ mod tests {
     fn insert_sql_returns_none_for_empty_columns() {
         use crate::db::catalog::QualifiedName;
         use crate::sql::SqlDialect;
-        assert!(copy_row_insert_sql(
-            SqlDialect::Sqlite,
-            &QualifiedName {
-                database: None,
-                schema: None,
-                object: "t".into(),
-            },
-            &[],
-            &[]
-        )
-        .is_none());
+        assert!(
+            copy_row_insert_sql(
+                SqlDialect::Sqlite,
+                &QualifiedName {
+                    database: None,
+                    schema: None,
+                    object: "t".into(),
+                },
+                &[],
+                &[]
+            )
+            .is_none()
+        );
     }
 }

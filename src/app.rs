@@ -1200,11 +1200,17 @@ impl App {
     fn copy_grid_row_insert_sql(&mut self) -> Vec<Command> {
         let Some(crate::model::tab::WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab)
         else {
-            self.notify_warning("Clipboard", "INSERT SQL copy is only available in Relation Data");
+            self.notify_warning(
+                "Clipboard",
+                "INSERT SQL copy is only available in Relation Data",
+            );
             return Vec::new();
         };
         if tab.view != crate::model::relation::RelationView::Data {
-            self.notify_warning("Clipboard", "INSERT SQL copy is only available in Relation Data");
+            self.notify_warning(
+                "Clipboard",
+                "INSERT SQL copy is only available in Relation Data",
+            );
             return Vec::new();
         }
         let qualified_name = tab.descriptor.qualified_name.clone();
