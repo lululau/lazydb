@@ -17,7 +17,7 @@ mod format;
 mod highlight;
 mod identifier_match;
 mod range;
-mod relation_filter;
+pub(crate) mod relation_filter;
 mod risk;
 mod scope;
 mod semantic;

@@ -1,4 +1,7 @@
+use crate::db::catalog::QualifiedName;
 use crate::db::{query::ColumnMeta, value::CellValue};
+use crate::sql::relation_filter::cell_sql_literal;
+use crate::sql::{SqlDialect, quote_identifier};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -132,6 +135,48 @@ pub fn copy_row_json(
     })
 }
 
+pub fn copy_row_insert_sql(
+    dialect: SqlDialect,
+    qualified_name: &QualifiedName,
+    columns: &[ColumnMeta],
+    row: &[CellValue],
+) -> Option<ClipboardPayload> {
+    if columns.is_empty() {
+        return None;
+    }
+    let table = quote_qualified_name(qualified_name, dialect);
+    let cols = columns
+        .iter()
+        .map(|column| quote_identifier(&column.name, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = columns
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            cell_sql_literal(row.get(index).unwrap_or(&CellValue::Null), dialect)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(ClipboardPayload {
+        text: format!("INSERT INTO {table} ({cols}) VALUES ({values});"),
+        description: format!("row: INSERT INTO {table} ({} columns)", columns.len()),
+        sensitive: false,
+    })
+}
+
+fn quote_qualified_name(name: &QualifiedName, dialect: SqlDialect) -> String {
+    let mut parts = Vec::new();
+    if let Some(database) = &name.database {
+        parts.push(quote_identifier(database, dialect));
+    }
+    if let Some(schema) = &name.schema {
+        parts.push(quote_identifier(schema, dialect));
+    }
+    parts.push(quote_identifier(&name.object, dialect));
+    parts.join(".")
+}
+
 fn cell_json_value(value: &CellValue) -> serde_json::Value {
     match value {
         CellValue::Null => serde_json::Value::Null,
@@ -165,7 +210,8 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardPayload, Osc52Error, copy_cell, copy_row_json, copy_row_tsv, osc52_sequence,
+        ClipboardPayload, Osc52Error, copy_cell, copy_row_insert_sql, copy_row_json, copy_row_tsv,
+        osc52_sequence,
     };
     use crate::db::{query::ColumnMeta, value::CellValue};
 
@@ -303,5 +349,77 @@ mod tests {
             serde_json::Value::String(CellValue::Float(f64::INFINITY).clipboard_text())
         );
         assert_eq!(value["blob"], serde_json::Value::String("0x01FF".into()));
+    }
+
+    #[test]
+    fn insert_sql_quotes_identifiers_and_literals_per_dialect() {
+        use crate::db::catalog::QualifiedName;
+        use crate::sql::SqlDialect;
+
+        let columns = vec![
+            ColumnMeta {
+                name: "id".into(),
+                type_name: "INT".into(),
+            },
+            ColumnMeta {
+                name: "name".into(),
+                type_name: "TEXT".into(),
+            },
+            ColumnMeta {
+                name: "note".into(),
+                type_name: "TEXT".into(),
+            },
+        ];
+        let row = vec![
+            CellValue::Integer(1),
+            CellValue::Text("O'Hara".into()),
+            CellValue::Null,
+        ];
+        let name = QualifiedName {
+            database: None,
+            schema: Some("public".into()),
+            object: "users".into(),
+        };
+        let payload =
+            copy_row_insert_sql(SqlDialect::Postgres, &name, &columns, &row).unwrap();
+        assert_eq!(
+            payload.text,
+            r#"INSERT INTO "public"."users" ("id", "name", "note") VALUES (1, 'O''Hara', NULL);"#
+        );
+        assert!(payload.description.contains("INSERT INTO"));
+        assert!(payload.description.contains("3 columns"));
+
+        let mysql = copy_row_insert_sql(
+            SqlDialect::MySql,
+            &QualifiedName {
+                database: Some("app".into()),
+                schema: None,
+                object: "users".into(),
+            },
+            &columns,
+            &row,
+        )
+        .unwrap();
+        assert_eq!(
+            mysql.text,
+            "INSERT INTO `app`.`users` (`id`, `name`, `note`) VALUES (1, 'O''Hara', NULL);"
+        );
+    }
+
+    #[test]
+    fn insert_sql_returns_none_for_empty_columns() {
+        use crate::db::catalog::QualifiedName;
+        use crate::sql::SqlDialect;
+        assert!(copy_row_insert_sql(
+            SqlDialect::Sqlite,
+            &QualifiedName {
+                database: None,
+                schema: None,
+                object: "t".into(),
+            },
+            &[],
+            &[]
+        )
+        .is_none());
     }
 }
