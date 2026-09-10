@@ -400,6 +400,9 @@ pub enum HelpShortcutId {
     RelationEditCancel,
     RelationVisualMove,
     RelationVisualYank,
+    RelationVisualCopyCell,
+    RelationVisualCopyJson,
+    RelationVisualCopyInsertSql,
     RelationVisualDelete,
     RelationVisualCancel,
     RelationDdlMove,
@@ -1986,9 +1989,34 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         RelationVisualYank,
         [RelationDataVisual],
-        "y",
+        "yy",
         "yank selected rows",
-        display
+        GridYank,
+        "y"
+    ),
+    row!(
+        RelationVisualCopyCell,
+        [RelationDataVisual],
+        "ys",
+        "copy selected column cells",
+        GridYank,
+        "s"
+    ),
+    row!(
+        RelationVisualCopyJson,
+        [RelationDataVisual],
+        "yj",
+        "copy selected rows as JSON",
+        GridYank,
+        "j"
+    ),
+    row!(
+        RelationVisualCopyInsertSql,
+        [RelationDataVisual],
+        "yq",
+        "copy selected rows as INSERT SQL",
+        GridYank,
+        "q"
     ),
     row!(
         RelationVisualDelete,
@@ -2000,7 +2028,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         RelationVisualCancel,
         [RelationDataVisual],
-        "V",
+        "Esc/q",
         "cancel row selection",
         display
     ),
@@ -3018,6 +3046,10 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::ResultsCopyRowJson => 2,
             Id::RelationCopyRowInsertSql => 3,
             Id::RelationYankRow => 4,
+            Id::RelationVisualYank => 5,
+            Id::RelationVisualCopyCell => 6,
+            Id::RelationVisualCopyJson => 7,
+            Id::RelationVisualCopyInsertSql => 8,
             _ => return None,
         },
         ShortcutPrefix::RelationDelete => match id {
@@ -4296,7 +4328,7 @@ mod tests {
         );
         assert_eq!(
             footer_sequences(ShortcutContext::RelationDataVisual, editable),
-            vec!["j/k", "y", "d", "V"]
+            vec!["j/k", "yy", "d", "Esc/q"]
         );
 
         let read_only = ShortcutCapabilities {

@@ -11,7 +11,10 @@ use uuid::Uuid;
 use crate::{
     action::{Action, Command, ProfileAccessChange, ProfileOrganizationMutation},
     cli::ConfirmationPolicy,
-    clipboard::{ClipboardPayload, copy_cell, copy_row_insert_sql, copy_row_json, copy_row_tsv},
+    clipboard::{
+        ClipboardPayload, copy_cell, copy_column_values, copy_row_insert_sql, copy_row_json,
+        copy_row_tsv, copy_rows_insert_sql, copy_rows_json,
+    },
     db::catalog_mutation::{
         CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerChoice,
         CatalogOwnerContextRequest, CatalogSelectionHint,
@@ -1228,6 +1231,100 @@ impl App {
             .collect()
     }
 
+    fn active_visual_selection_snapshot(&self) -> Option<(Vec<ColumnMeta>, Vec<Vec<CellValue>>)> {
+        let WorkspaceTab::Relation(tab) = self.tabs.get(self.active_tab)? else {
+            return None;
+        };
+        if tab.view != crate::model::relation::RelationView::Data {
+            return None;
+        }
+        let edit = tab.edit.as_ref()?;
+        let (start, end) = edit.visual_range(tab.grid.selected_row)?;
+        let result = match &tab.data {
+            RelationLoad::Ready(snapshot) => snapshot.value.result.result_sets.last(),
+            RelationLoad::Loading { previous, .. }
+            | RelationLoad::Failed { previous, .. }
+            | RelationLoad::Cancelled { previous } => previous
+                .as_ref()
+                .and_then(|snapshot| snapshot.value.result.result_sets.last()),
+            RelationLoad::Empty => None,
+        }?;
+        let rows = (start..=end)
+            .filter_map(|index| edit.rows.get(index))
+            .map(|row| row.current.clone())
+            .collect::<Vec<_>>();
+        Some((result.columns.clone(), rows))
+    }
+
+    fn copy_grid_selection_column(&mut self) -> Vec<Command> {
+        let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
+            self.notify_warning(
+                "Clipboard",
+                "Column copy needs a row selection in Relation Data",
+            );
+            return Vec::new();
+        };
+        let column = self.active_grid_column();
+        let Some(meta) = columns.get(column) else {
+            return Vec::new();
+        };
+        let values = rows
+            .iter()
+            .map(|row| {
+                row.get(column)
+                    .cloned()
+                    .unwrap_or(crate::db::value::CellValue::Null)
+            })
+            .collect::<Vec<_>>();
+        vec![Command::WriteClipboard(copy_column_values(
+            &meta.name, &values,
+        ))]
+    }
+
+    fn copy_grid_selection_json(&mut self) -> Vec<Command> {
+        let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
+            self.notify_warning(
+                "Clipboard",
+                "JSON copy needs a row selection in Relation Data",
+            );
+            return Vec::new();
+        };
+        copy_rows_json(&columns, &rows)
+            .map(Command::WriteClipboard)
+            .into_iter()
+            .collect()
+    }
+
+    fn copy_grid_selection_insert_sql(&mut self) -> Vec<Command> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            self.notify_warning(
+                "Clipboard",
+                "INSERT SQL copy is only available in Relation Data",
+            );
+            return Vec::new();
+        };
+        if tab.view != crate::model::relation::RelationView::Data {
+            self.notify_warning(
+                "Clipboard",
+                "INSERT SQL copy is only available in Relation Data",
+            );
+            return Vec::new();
+        }
+        let qualified_name = tab.descriptor.qualified_name.clone();
+        let dialect = self.sql_dialect();
+        let Some((columns, rows)) = self.active_visual_selection_snapshot() else {
+            self.notify_warning(
+                "Clipboard",
+                "INSERT SQL copy needs a row selection in Relation Data",
+            );
+            return Vec::new();
+        };
+        copy_rows_insert_sql(dialect, &qualified_name, &columns, &rows)
+            .map(Command::WriteClipboard)
+            .into_iter()
+            .collect()
+    }
+
     fn grid_value_detail(
         &self,
         column: usize,
@@ -2128,6 +2225,9 @@ impl App {
             Id::ResultsCopyCell => vec![Action::CopyGridCell],
             Id::ResultsCopyRowJson => vec![Action::CopyGridRowJson],
             Id::RelationCopyRowInsertSql => vec![Action::CopyGridRowInsertSql],
+            Id::RelationVisualCopyCell => vec![Action::CopyGridSelectionColumn],
+            Id::RelationVisualCopyJson => vec![Action::CopyGridSelectionJson],
+            Id::RelationVisualCopyInsertSql => vec![Action::CopyGridSelectionInsertSql],
             Id::ResultsCopyRow => vec![Action::CopyGridRow {
                 include_headers: false,
             }],
@@ -2208,6 +2308,9 @@ impl App {
                         | Action::CopyGridRow { .. }
                         | Action::CopyGridRowJson
                         | Action::CopyGridRowInsertSql
+                        | Action::CopyGridSelectionColumn
+                        | Action::CopyGridSelectionJson
+                        | Action::CopyGridSelectionInsertSql
                         | Action::ViewGridCell
                         | Action::CopyRecordViewCell
                         | Action::CopyRecordViewRow { .. }
@@ -7330,6 +7433,9 @@ impl App {
             Action::CopyGridRow { include_headers } => self.copy_grid_row(include_headers),
             Action::CopyGridRowJson => self.copy_grid_row_json(),
             Action::CopyGridRowInsertSql => self.copy_grid_row_insert_sql(),
+            Action::CopyGridSelectionColumn => self.copy_grid_selection_column(),
+            Action::CopyGridSelectionJson => self.copy_grid_selection_json(),
+            Action::CopyGridSelectionInsertSql => self.copy_grid_selection_insert_sql(),
             Action::ClipboardWriteFailed { message } => {
                 self.notify_error("Clipboard", &message);
                 Vec::new()
@@ -16513,12 +16619,13 @@ impl App {
     fn relation_yank(&mut self, selected: bool) {
         let row = self.active_grid_row();
         if let Some(edit) = self.relation_session_mut() {
-            let row = if selected {
-                edit.visual_range(row).map_or(row, |(start, _)| start)
+            if selected {
+                if let Some((start, end)) = edit.visual_range(row) {
+                    edit.yank_rows(start..=end);
+                }
             } else {
-                row
-            };
-            edit.yank_row(row);
+                edit.yank_row(row);
+            }
         }
     }
     fn relation_paste(&mut self) -> Vec<Command> {
@@ -16527,7 +16634,7 @@ impl App {
             return Vec::new();
         };
         let position = row.saturating_add(1);
-        if !edit.paste_row(position) {
+        if !edit.paste_rows(position) {
             return Vec::new();
         }
         Vec::new()

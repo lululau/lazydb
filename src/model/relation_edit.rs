@@ -138,7 +138,7 @@ impl EditableRow {
 pub struct RelationEditSession {
     pub mode: RelationGridMode,
     pub rows: Vec<EditableRow>,
-    pub yank: Option<Vec<CellValue>>,
+    pub yank: Option<Vec<Vec<CellValue>>>,
     pub undo_depth: usize,
     pub redo_depth: usize,
     next_row_id: u64,
@@ -211,7 +211,20 @@ impl RelationEditSession {
         let Some(row) = self.rows.get(row) else {
             return false;
         };
-        self.yank = Some(row.current.clone());
+        self.yank = Some(vec![row.current.clone()]);
+        true
+    }
+
+    pub fn yank_rows(&mut self, range: std::ops::RangeInclusive<usize>) -> bool {
+        let rows = range
+            .clone()
+            .filter_map(|index| self.rows.get(index))
+            .map(|row| row.current.clone())
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            return false;
+        }
+        self.yank = Some(rows);
         true
     }
 
@@ -256,13 +269,18 @@ impl RelationEditSession {
         changed
     }
 
-    pub fn paste_row(&mut self, position: usize) -> bool {
-        let Some(values) = self.yank.clone() else {
+    pub fn paste_rows(&mut self, position: usize) -> bool {
+        let Some(rows) = self.yank.clone() else {
             return false;
         };
-        let id = self.insert_row(position, values);
-        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
-            row.supplied_columns = (0..row.current.len()).collect();
+        if rows.is_empty() {
+            return false;
+        }
+        for (offset, values) in rows.into_iter().enumerate() {
+            let id = self.insert_row(position.saturating_add(offset), values);
+            if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+                row.supplied_columns = (0..row.current.len()).collect();
+            }
         }
         true
     }
@@ -423,7 +441,7 @@ mod tests {
         let inserted_row = session.rows.iter().find(|row| row.id == inserted).unwrap();
         assert_eq!(inserted_row.version, None);
         assert!(session.yank_row(0));
-        assert_eq!(session.yank, Some(vec![CellValue::Integer(1)]));
+        assert_eq!(session.yank, Some(vec![vec![CellValue::Integer(1)]]));
     }
 
     #[test]
@@ -449,13 +467,45 @@ mod tests {
     }
 
     #[test]
+    fn yank_rows_captures_a_range_and_paste_restores_every_row() {
+        let mut session = RelationEditSession::from_rows(vec![
+            vec![CellValue::Integer(1)],
+            vec![CellValue::Integer(2)],
+            vec![CellValue::Integer(3)],
+        ]);
+        session.mode = RelationGridMode::VisualLine { anchor: 0 };
+        assert!(session.yank_rows(0..=2));
+        assert_eq!(
+            session.yank,
+            Some(vec![
+                vec![CellValue::Integer(1)],
+                vec![CellValue::Integer(2)],
+                vec![CellValue::Integer(3)],
+            ])
+        );
+        assert!(session.paste_rows(3));
+        assert_eq!(session.rows.len(), 6);
+        assert_eq!(session.rows[3].current, vec![CellValue::Integer(1)]);
+        assert_eq!(session.rows[4].current, vec![CellValue::Integer(2)]);
+        assert_eq!(session.rows[5].current, vec![CellValue::Integer(3)]);
+        for row in &session.rows[3..] {
+            assert!(matches!(row.state, EditableRowState::InsertDraft));
+            assert_eq!(row.supplied_columns, [0].into_iter().collect());
+        }
+
+        assert!(!session.yank_rows(9..=12));
+        assert!(session.yank_rows(2..=2));
+        assert_eq!(session.yank, Some(vec![vec![CellValue::Integer(3)]]));
+    }
+
+    #[test]
     fn inserted_rows_receive_stable_ids_and_yank_is_structured() {
         let mut session = RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]);
         let first = session.rows[0].id;
         let inserted = session.insert_row(0, vec![CellValue::Integer(2)]);
         assert_ne!(first, inserted);
         assert!(session.yank_row(0));
-        assert_eq!(session.yank, Some(vec![CellValue::Integer(2)]));
+        assert_eq!(session.yank, Some(vec![vec![CellValue::Integer(2)]]));
         assert_ne!(session.rows[1].id, session.rows[0].id);
     }
 

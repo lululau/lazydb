@@ -110,7 +110,43 @@ pub fn copy_row_tsv(
     })
 }
 
+pub fn copy_column_values(label: &str, values: &[CellValue]) -> ClipboardPayload {
+    ClipboardPayload {
+        text: values
+            .iter()
+            .map(|value| value.clipboard_text())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        description: format!("column {label}: {} rows", values.len()),
+        sensitive: false,
+    }
+}
+
 pub fn copy_row_json(columns: &[ColumnMeta], row: &[CellValue]) -> Option<ClipboardPayload> {
+    let object = row_json_object(columns, row)?;
+    Some(ClipboardPayload {
+        text: object,
+        description: format!("row: {} columns as JSON", columns.len()),
+        sensitive: false,
+    })
+}
+
+pub fn copy_rows_json(columns: &[ColumnMeta], rows: &[Vec<CellValue>]) -> Option<ClipboardPayload> {
+    if columns.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let objects = rows
+        .iter()
+        .map(|row| row_json_object(columns, row))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClipboardPayload {
+        text: format!("[{}]", objects.join(",")),
+        description: format!("rows: {} as JSON", rows.len()),
+        sensitive: false,
+    })
+}
+
+fn row_json_object(columns: &[ColumnMeta], row: &[CellValue]) -> Option<String> {
     if columns.is_empty() {
         return None;
     }
@@ -125,11 +161,7 @@ pub fn copy_row_json(columns: &[ColumnMeta], row: &[CellValue]) -> Option<Clipbo
             cell_json_value(value)
         ));
     }
-    Some(ClipboardPayload {
-        text: format!("{{{}}}", parts.join(",")),
-        description: format!("row: {} columns as JSON", columns.len()),
-        sensitive: false,
-    })
+    Some(format!("{{{}}}", parts.join(",")))
 }
 
 pub fn copy_row_insert_sql(
@@ -138,6 +170,48 @@ pub fn copy_row_insert_sql(
     columns: &[ColumnMeta],
     row: &[CellValue],
 ) -> Option<ClipboardPayload> {
+    let statement = insert_statement(dialect, qualified_name, columns, row)?;
+    Some(ClipboardPayload {
+        text: statement,
+        description: format!(
+            "row: INSERT INTO {} ({} columns)",
+            qualified_name.object,
+            columns.len()
+        ),
+        sensitive: false,
+    })
+}
+
+pub fn copy_rows_insert_sql(
+    dialect: SqlDialect,
+    qualified_name: &QualifiedName,
+    columns: &[ColumnMeta],
+    rows: &[Vec<CellValue>],
+) -> Option<ClipboardPayload> {
+    if columns.is_empty() || rows.is_empty() {
+        return None;
+    }
+    let statements = rows
+        .iter()
+        .map(|row| insert_statement(dialect, qualified_name, columns, row))
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClipboardPayload {
+        text: statements.join("\n"),
+        description: format!(
+            "rows: {} INSERT INTO {} statements",
+            rows.len(),
+            qualified_name.object
+        ),
+        sensitive: false,
+    })
+}
+
+fn insert_statement(
+    dialect: SqlDialect,
+    qualified_name: &QualifiedName,
+    columns: &[ColumnMeta],
+    row: &[CellValue],
+) -> Option<String> {
     if columns.is_empty() {
         return None;
     }
@@ -153,11 +227,7 @@ pub fn copy_row_insert_sql(
         .map(|(index, _)| cell_sql_literal(row.get(index).unwrap_or(&CellValue::Null), dialect))
         .collect::<Vec<_>>()
         .join(", ");
-    Some(ClipboardPayload {
-        text: format!("INSERT INTO {table} ({cols}) VALUES ({values});"),
-        description: format!("row: INSERT INTO {table} ({} columns)", columns.len()),
-        sensitive: false,
-    })
+    Some(format!("INSERT INTO {table} ({cols}) VALUES ({values});"))
 }
 
 fn quote_qualified_name(name: &QualifiedName, dialect: SqlDialect) -> String {
@@ -205,8 +275,8 @@ impl<T> Pipe for T {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ClipboardPayload, Osc52Error, copy_cell, copy_row_insert_sql, copy_row_json, copy_row_tsv,
-        osc52_sequence,
+        ClipboardPayload, Osc52Error, copy_cell, copy_column_values, copy_row_insert_sql,
+        copy_row_json, copy_row_tsv, copy_rows_insert_sql, copy_rows_json, osc52_sequence,
     };
     use crate::db::{query::ColumnMeta, value::CellValue};
 
@@ -282,6 +352,69 @@ mod tests {
                 max_bytes: 4
             })
         );
+    }
+
+    #[test]
+    fn column_values_copy_joins_one_value_per_line() {
+        let payload = copy_column_values(
+            "users.name",
+            &[
+                CellValue::Text("Ada".into()),
+                CellValue::Null,
+                CellValue::Text("Grace".into()),
+            ],
+        );
+        assert_eq!(payload.text, "Ada\n\nGrace");
+        assert_eq!(payload.description, "column users.name: 3 rows");
+    }
+
+    #[test]
+    fn rows_json_copy_wraps_objects_in_an_array() {
+        let columns = vec![
+            ColumnMeta {
+                name: "id".into(),
+                type_name: "INT".into(),
+            },
+            ColumnMeta {
+                name: "name".into(),
+                type_name: "TEXT".into(),
+            },
+        ];
+        let rows = vec![
+            vec![CellValue::Integer(1), CellValue::Text("Ada".into())],
+            vec![CellValue::Integer(2), CellValue::Null],
+        ];
+        let payload = copy_rows_json(&columns, &rows).unwrap();
+        assert_eq!(
+            payload.text,
+            r#"[{"id":1,"name":"Ada"},{"id":2,"name":null}]"#
+        );
+        assert_eq!(payload.description, "rows: 2 as JSON");
+        assert!(copy_rows_json(&columns, &[]).is_none());
+    }
+
+    #[test]
+    fn rows_insert_sql_copy_emits_one_statement_per_row() {
+        use crate::db::catalog::QualifiedName;
+        use crate::sql::SqlDialect;
+
+        let columns = vec![ColumnMeta {
+            name: "id".into(),
+            type_name: "INT".into(),
+        }];
+        let rows = vec![vec![CellValue::Integer(1)], vec![CellValue::Integer(2)]];
+        let name = QualifiedName {
+            database: None,
+            schema: Some("public".into()),
+            object: "users".into(),
+        };
+        let payload = copy_rows_insert_sql(SqlDialect::Postgres, &name, &columns, &rows).unwrap();
+        assert_eq!(
+            payload.text,
+            "INSERT INTO \"public\".\"users\" (\"id\") VALUES (1);\nINSERT INTO \"public\".\"users\" (\"id\") VALUES (2);"
+        );
+        assert_eq!(payload.description, "rows: 2 INSERT INTO users statements");
+        assert!(copy_rows_insert_sql(SqlDialect::Postgres, &name, &columns, &[]).is_none());
     }
 
     #[test]

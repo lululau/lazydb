@@ -202,6 +202,21 @@ pub(crate) fn render(
             }
             crate::model::relation_edit::EditableRowState::Clean => None,
         });
+        let visual_selected = edit
+            .and_then(|session| session.visual_range(grid.selected_row))
+            .is_some_and(|(start, end)| row_index >= start && row_index <= end);
+        // Deleted rows keep their marker even inside a visual selection.
+        let row_style = if visual_selected
+            && !editable.is_some_and(|row| {
+                matches!(
+                    row.state,
+                    crate::model::relation_edit::EditableRowState::Deleted
+                )
+            }) {
+            Some(row_style.unwrap_or_default().bg(theme.selection))
+        } else {
+            row_style
+        };
         let changed_columns = editable.and_then(|row| match &row.state {
             crate::model::relation_edit::EditableRowState::Updated { changed_columns } => {
                 Some(changed_columns)

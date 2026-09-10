@@ -1228,10 +1228,10 @@ impl Keymap {
 
         if is_relation_data_focus(app) {
             if (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
-                && relation_grid_is_browse(app)
+                && (relation_grid_is_browse(app) || relation_grid_is_visual(app))
             {
                 match event.code {
-                    KeyCode::Char('d') => {
+                    KeyCode::Char('d') if relation_grid_is_browse(app) => {
                         self.set_pending(Pending::RelationDelete, app);
                         return None;
                     }
@@ -1239,7 +1239,7 @@ impl Keymap {
                         self.set_pending(Pending::GridYank, app);
                         return None;
                     }
-                    KeyCode::Char('Y') => {
+                    KeyCode::Char('Y') if relation_grid_is_browse(app) => {
                         return Some(Action::CopyGridRow {
                             include_headers: false,
                         });
@@ -2252,6 +2252,26 @@ fn map_pending(
                 include_headers: true,
             })
         }
+        (Pending::GridYank, KeyCode::Char('s'))
+            if is_relation_data_focus(app) && relation_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionColumn)
+        }
+        (Pending::GridYank, KeyCode::Char('j'))
+            if is_relation_data_focus(app) && relation_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionJson)
+        }
+        (Pending::GridYank, KeyCode::Char('q'))
+            if is_relation_data_focus(app) && relation_grid_is_visual(app) =>
+        {
+            Some(Action::CopyGridSelectionInsertSql)
+        }
+        (Pending::GridYank, KeyCode::Char('y'))
+            if is_relation_data_focus(app) && relation_grid_is_visual(app) =>
+        {
+            Some(Action::RelationYankSelected)
+        }
         (Pending::GridYank, KeyCode::Char('s')) => Some(Action::CopyGridCell),
         (Pending::GridYank, KeyCode::Char('j')) => Some(Action::CopyGridRowJson),
         (Pending::GridYank, KeyCode::Char('q'))
@@ -2425,6 +2445,18 @@ fn relation_grid_is_browse(app: &App) -> bool {
             _ => None,
         })
         .is_none_or(|edit| matches!(edit.mode, RelationGridMode::Browse))
+}
+
+fn relation_grid_is_visual(app: &App) -> bool {
+    use crate::model::relation_edit::RelationGridMode;
+
+    app.tabs
+        .get(app.active_tab)
+        .and_then(|tab| match tab {
+            crate::model::tab::WorkspaceTab::Relation(tab) => tab.edit.as_ref(),
+            _ => None,
+        })
+        .is_some_and(|edit| matches!(edit.mode, RelationGridMode::VisualLine { .. }))
 }
 
 fn is_relation_cell_editor(app: &App) -> bool {
@@ -2646,8 +2678,9 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
                 columns: 0,
             }),
             KeyCode::Char('d') => Some(Action::RelationDeleteSelected),
-            KeyCode::Char('y') => Some(Action::RelationYankSelected),
-            KeyCode::Char('V') => Some(Action::RelationEditCancel),
+            // y starts the GridYank prefix (yy/ys/yj/yq) handled by the
+            // pending-sequence machinery, so it must not map here.
+            KeyCode::Esc | KeyCode::Char('q') => Some(Action::RelationEditCancel),
             _ => None,
         },
         _ => match event.code {
@@ -4155,10 +4188,33 @@ mod tests {
         );
 
         let app = relation_app(RelationGridMode::VisualLine { anchor: 1 });
+        for code in [KeyCode::Esc, KeyCode::Char('q')] {
+            assert_eq!(
+                keymap.map(key(code), &app),
+                Some(Action::RelationEditCancel)
+            );
+        }
+        // V only enters row selection; Esc/q leave it.
         assert_eq!(
             keymap.map(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT), &app),
-            Some(Action::RelationEditCancel)
+            None
         );
+    }
+
+    #[test]
+    fn relation_visual_yank_prefix_targets_the_selection() {
+        let app = relation_app(RelationGridMode::VisualLine { anchor: 1 });
+        let mut keymap = Keymap::default();
+
+        for (suffix, action) in [
+            (KeyCode::Char('y'), Action::RelationYankSelected),
+            (KeyCode::Char('s'), Action::CopyGridSelectionColumn),
+            (KeyCode::Char('j'), Action::CopyGridSelectionJson),
+            (KeyCode::Char('q'), Action::CopyGridSelectionInsertSql),
+        ] {
+            assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+            assert_eq!(keymap.map(key(suffix), &app), Some(action));
+        }
     }
 
     #[test]
