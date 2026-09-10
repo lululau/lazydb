@@ -22,7 +22,8 @@ Grid copy today is inconsistent and incomplete:
   - `yq` copies `INSERT INTO <qualified> (<cols>) VALUES (<vals>);` using the relation's qualified name and the active connection dialect.
   - `yy` continues to internal-yank the current row for `p` paste.
 - In **SQL Results**, bare `y` no longer copies immediately; it starts the shared yank prefix (same model as Relation).
-- `Y` and Application `Space Y` (TSV / TSV with headers) remain unchanged in both contexts.
+- **Dashboard Processes** keeps today's immediate `y` (cell) and `Y` (TSV). It is out of product scope for `ys`/`yj`/`yq`; the keymap change must carve it out of the SQL Results pending-`y` path so Processes does not silently lose bare `y`.
+- `Y` and Application `Space Y` (TSV / TSV with headers) remain unchanged in SQL Results and Relation Data.
 - `yq` is not bound in SQL Results (no unique writable table for arbitrary result sets).
 - Empty / missing data yields the existing clipboard warning and does not write the clipboard.
 - Help palette rows and `docs/keybindings.md` document the new sequences; keymap and clipboard unit tests cover them; shortcut catalog entries are updated where the project requires shared IDs.
@@ -30,6 +31,7 @@ Grid copy today is inconsistent and incomplete:
 ## Non-goals
 
 - INSERT SQL for SQL Results (user chose Relation-only `yq`).
+- Moving Dashboard Processes onto `ys`/`yj`/`yq` (keep its immediate `y`/`Y`).
 - Multi-row JSON arrays, pretty-printed JSON, or a format-picker overlay.
 - Changing Record View mouse copy buttons or text-detail copy.
 - Removing or rebinding `Y`, `Space Y`, or Relation `yy`.
@@ -86,10 +88,13 @@ Identical to current `copy_cell`: description `cell {label}` (or NULL note); tex
   | `Integer` / `Unsigned` / finite `Float` | unquoted number |
   | non-finite `Float` | quoted `clipboard_text()` string |
   | `Text` / date-time | `'…'` with `'` → `''`; MySQL also escapes `\` → `\\` |
-  | `Bytes` | MySQL/SQL Server `0xDEADBEEF`; SQLite `x'DEADBEEF'`; Postgres `'\xDEADBEEF'::bytea` |
+  | `Bytes` | Reuse the same dialect table as `bytes_literal` in `src/sql/relation_filter.rs`: MySQL `X'DEADBEEF'`; SQL Server `0xDEADBEEF`; SQLite/`Generic` `x'DEADBEEF'`; Postgres `'\xDEADBEEF'::bytea` |
   | `Unsupported` | quoted preview string |
 
+- Boolean / string / bytes literals must call or share the existing `string_literal` / `bytes_literal` helpers (export or move them to a shared SQL-literal module if needed) so INSERT copy cannot drift from `cell_where_clause`.
+- `SqlDialect::Generic` follows the SQLite branch for identifiers and literals (same as `bytes_literal` / filter helpers today).
 - Column list and values follow the current grid row (including Relation edit-session current values when present), same snapshot path as TSV copy.
+- `ClipboardPayload.description` shapes (parallel to existing helpers): `row: {n} columns as JSON`, `row: INSERT INTO … ({n} columns)`.
 
 ## Changes
 
@@ -105,11 +110,13 @@ Identical to current `copy_cell`: description `cell {label}` (or NULL note); tex
 
 3. **`src/input/keymap.rs`**
    - Introduce `Pending::GridYank` (or rename/generalize `RelationYank` to the shared name).
-   - SQL Results / read-only grids: `y` sets pending instead of immediate `CopyGridCell`.
-   - Relation browse: `y` sets the same pending (replacing `Pending::RelationYank`).
-   - Continuations: `s` → `CopyGridCell`, `j` → `CopyGridRowJson`, `q` → `CopyGridRowInsertSql` only when `relation_grid_is_browse(app)`, `y` → `RelationYank` only in Relation browse.
+   - Split today's combined `(is_sql_grid_focus || is_read_only_grid_focus)` bare-`y` binding:
+     - **SQL Results Data** (`is_sql_grid_focus`): `y` sets `Pending::GridYank` (no immediate copy).
+     - **Dashboard Processes** (`is_read_only_grid_focus` and not SQL): keep immediate `y` → `CopyGridCell` and `Y` → TSV.
+   - Relation browse: `y` sets the same `Pending::GridYank` (replacing `Pending::RelationYank`).
+   - Continuations on `GridYank`: `s` → `CopyGridCell`, `j` → `CopyGridRowJson`; `q` → `CopyGridRowInsertSql` and `y` → `RelationYank` only when `relation_grid_is_browse(app)`.
    - Invalid second keys clear pending without side effects (existing pending behavior).
-   - `Y` / leader `Space Y` unchanged.
+   - `Y` / leader `Space Y` unchanged on SQL Results and Relation.
 
 4. **`src/app.rs`**
    - `CopyGridRowJson` → `copy_row_json` + `WriteClipboard` (sensitive flag via `active_process_grid()` like other grid copies).
@@ -146,4 +153,4 @@ Identical to current `copy_cell`: description `cell {label}` (or NULL note); tex
 
 - Prefer renaming `Pending::RelationYank` → `Pending::GridYank` in the same change if call sites are few; keep Help prefix labeling clear for `yy` vs new sequences.
 - Reuse `quote_identifier` from `src/sql/completion.rs` (already used by relation filter) rather than duplicating quote logic.
-- Boolean / bytes literal rules should stay consistent with `cell_where_clause` in `relation_filter.rs` where that helper already encodes dialect choices.
+- Prefer exporting or relocating `string_literal` / `bytes_literal` from `relation_filter.rs` over re-implementing them inside `clipboard.rs`.
