@@ -131,7 +131,7 @@ pub fn cell_where_clause(
     Ok(format!("{quoted} = {literal}"))
 }
 
-fn string_literal(value: &str, dialect: SqlDialect) -> String {
+pub(crate) fn string_literal(value: &str, dialect: SqlDialect) -> String {
     let escaped = value.replace('\'', "''");
     let escaped = if dialect == SqlDialect::MySql {
         escaped.replace('\\', "\\\\")
@@ -141,7 +141,7 @@ fn string_literal(value: &str, dialect: SqlDialect) -> String {
     format!("'{escaped}'")
 }
 
-fn bytes_literal(value: &[u8], dialect: SqlDialect) -> String {
+pub(crate) fn bytes_literal(value: &[u8], dialect: SqlDialect) -> String {
     let hex = value
         .iter()
         .map(|byte| format!("{byte:02X}"))
@@ -151,6 +151,26 @@ fn bytes_literal(value: &[u8], dialect: SqlDialect) -> String {
         SqlDialect::SqlServer => format!("0x{hex}"),
         SqlDialect::Postgres => format!("'\\x{hex}'::bytea"),
         SqlDialect::Sqlite | SqlDialect::Generic => format!("x'{hex}'"),
+    }
+}
+
+pub(crate) fn cell_sql_literal(value: &CellValue, dialect: SqlDialect) -> String {
+    match value {
+        CellValue::Null => "NULL".into(),
+        CellValue::Boolean(inner) => match dialect {
+            SqlDialect::Postgres => if *inner { "TRUE" } else { "FALSE" }.into(),
+            _ => u8::from(*inner).to_string(),
+        },
+        CellValue::Integer(_) | CellValue::Unsigned(_) => value.clipboard_text(),
+        CellValue::Float(inner) if inner.is_finite() => value.clipboard_text(),
+        CellValue::Float(_) => string_literal(&value.clipboard_text(), dialect),
+        CellValue::Text(inner) => string_literal(inner, dialect),
+        CellValue::Bytes(inner) => bytes_literal(inner, dialect),
+        CellValue::Date(_)
+        | CellValue::Time(_)
+        | CellValue::DateTime(_)
+        | CellValue::Timestamp(_) => string_literal(&value.clipboard_text(), dialect),
+        CellValue::Unsupported { preview, .. } => string_literal(preview, dialect),
     }
 }
 
@@ -604,5 +624,61 @@ mod tests {
                 "validation rejected: {clause} ({dialect:?})",
             );
         }
+    }
+
+    #[test]
+    fn cell_sql_literal_matches_filter_helpers_and_quotes_unfilterable_values() {
+        use crate::db::value::CellValue;
+
+        assert_eq!(
+            cell_sql_literal(&CellValue::Null, SqlDialect::Postgres),
+            "NULL"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Boolean(true), SqlDialect::Postgres),
+            "TRUE"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Boolean(false), SqlDialect::MySql),
+            "0"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Integer(42), SqlDialect::Sqlite),
+            "42"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Text("it's".into()), SqlDialect::Postgres),
+            "'it''s'"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Bytes(vec![0xDE, 0xAD]), SqlDialect::MySql),
+            "X'DEAD'"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Bytes(vec![0xDE, 0xAD]), SqlDialect::SqlServer),
+            "0xDEAD"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Bytes(vec![0xDE, 0xAD]), SqlDialect::Postgres),
+            "'\\xDEAD'::bytea"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Bytes(vec![0xDE, 0xAD]), SqlDialect::Generic),
+            "x'DEAD'"
+        );
+        assert_eq!(
+            cell_sql_literal(&CellValue::Float(f64::NAN), SqlDialect::Postgres),
+            format!("'{}'", CellValue::Float(f64::NAN).clipboard_text())
+        );
+        assert_eq!(
+            cell_sql_literal(
+                &CellValue::Unsupported {
+                    type_name: "xml".into(),
+                    preview: "<a/>".into(),
+                },
+                SqlDialect::Postgres
+            ),
+            "'<a/>'"
+        );
     }
 }
