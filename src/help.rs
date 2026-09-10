@@ -369,6 +369,8 @@ pub enum HelpShortcutId {
     ResultsAlignBottom,
     ResultsOpenRecordView,
     ResultsCopyCell,
+    ResultsCopyRowJson,
+    RelationCopyRowInsertSql,
     ResultsCopyRow,
     ResultsCopyRowWithHeaders,
     ResultsToggleView,
@@ -659,7 +661,7 @@ pub enum ShortcutPrefix {
     ExplorerAlign,
     Previous,
     Next,
-    RelationYank,
+    GridYank,
     RelationDelete,
     RecordViewGoto,
 }
@@ -677,7 +679,7 @@ impl ShortcutPrefix {
             Self::ExplorerAlign => "z",
             Self::Previous => "[",
             Self::Next => "]",
-            Self::RelationYank => "y",
+            Self::GridYank => "y",
             Self::RelationDelete => "d",
             Self::RecordViewGoto => "g",
         }
@@ -1552,7 +1554,30 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         RecordViewAvailable,
         executable
     ),
-    row!(ResultsCopyCell, [SqlResultsData], "y", "copy selected cell"),
+    row!(
+        ResultsCopyCell,
+        [SqlResultsData, RelationDataBrowse],
+        "ys",
+        "copy selected cell",
+        GridYank,
+        "s"
+    ),
+    row!(
+        ResultsCopyRowJson,
+        [SqlResultsData, RelationDataBrowse],
+        "yj",
+        "copy selected row as JSON",
+        GridYank,
+        "j"
+    ),
+    row!(
+        RelationCopyRowInsertSql,
+        [RelationDataBrowse],
+        "yq",
+        "copy selected row as INSERT SQL",
+        GridYank,
+        "q"
+    ),
     row!(
         ResultsCopyRow,
         [SqlResultsData, RelationDataBrowse],
@@ -1572,7 +1597,7 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
         [RelationDataBrowse],
         "yy",
         "yank row",
-        RelationYank,
+        GridYank,
         "y"
     ),
     row!(
@@ -2860,6 +2885,8 @@ pub(crate) fn configured_sequence(
         HelpShortcutId::ResultsPageSize => Some("results-page-size"),
         HelpShortcutId::ResultsOpenRecordView => Some("results-open-record"),
         HelpShortcutId::ResultsCopyCell => Some("results-copy-cell"),
+        HelpShortcutId::ResultsCopyRowJson => Some("results-copy-row-json"),
+        HelpShortcutId::RelationCopyRowInsertSql => Some("results-copy-row-insert-sql"),
         HelpShortcutId::ResultsCopyRow => Some("results-copy-row"),
         HelpShortcutId::ResultsCopyRowWithHeaders => Some("results-copy-row-headers"),
         HelpShortcutId::ResultsToggleView => Some("results-toggle-view"),
@@ -2986,8 +3013,11 @@ fn prefix_rank(prefix: ShortcutPrefix, id: HelpShortcutId) -> Option<u8> {
             Id::NextTabAlias => 1,
             _ => return None,
         },
-        ShortcutPrefix::RelationYank => match id {
-            Id::RelationYankRow => 1,
+        ShortcutPrefix::GridYank => match id {
+            Id::ResultsCopyCell => 1,
+            Id::ResultsCopyRowJson => 2,
+            Id::RelationCopyRowInsertSql => 3,
+            Id::RelationYankRow => 4,
             _ => return None,
         },
         ShortcutPrefix::RelationDelete => match id {
@@ -4213,7 +4243,7 @@ mod tests {
             ),
             (
                 ShortcutContext::SqlResultsData,
-                vec!["h", "j", "k", "l", "v", "y", "Y", "o", "/", "? (also F1)"],
+                vec!["h", "j", "k", "l", "v", "ys", "Y", "o", "/", "? (also F1)"],
             ),
             (
                 ShortcutContext::SqlOutput,
@@ -4499,11 +4529,13 @@ mod tests {
             .expect("relation yank row");
         assert_eq!(yank.sequence, "yy");
         assert_eq!(yank.description, "yank row");
-        assert!(
-            !rows
-                .iter()
-                .any(|row| row.id == HelpShortcutId::ResultsCopyCell)
-        );
+        assert_eq!(yank.prefix, Some(ShortcutPrefix::GridYank));
+        let copy_cell = rows
+            .iter()
+            .find(|row| row.id == HelpShortcutId::ResultsCopyCell)
+            .expect("relation copy cell");
+        assert_eq!(copy_cell.sequence, "ys");
+        assert_eq!(copy_cell.prefix, Some(ShortcutPrefix::GridYank));
 
         let footer = footer_sequences(
             ShortcutContext::RelationDataBrowse,
@@ -4846,9 +4878,25 @@ mod tests {
             prefix_ids(
                 ShortcutContext::RelationDataBrowse,
                 ShortcutCapabilities::relation_data(),
-                ShortcutPrefix::RelationYank,
+                ShortcutPrefix::GridYank,
             ),
-            vec![HelpShortcutId::RelationYankRow]
+            vec![
+                HelpShortcutId::ResultsCopyCell,
+                HelpShortcutId::ResultsCopyRowJson,
+                HelpShortcutId::RelationCopyRowInsertSql,
+                HelpShortcutId::RelationYankRow,
+            ]
+        );
+        assert_eq!(
+            prefix_ids(
+                ShortcutContext::SqlResultsData,
+                ShortcutCapabilities::default(),
+                ShortcutPrefix::GridYank,
+            ),
+            vec![
+                HelpShortcutId::ResultsCopyCell,
+                HelpShortcutId::ResultsCopyRowJson,
+            ]
         );
         assert_eq!(
             prefix_ids(

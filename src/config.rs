@@ -54,6 +54,8 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "results-page-size",
     "results-open-record",
     "results-copy-cell",
+    "results-copy-row-json",
+    "results-copy-row-insert-sql",
     "results-copy-row",
     "results-copy-row-headers",
     "results-toggle-view",

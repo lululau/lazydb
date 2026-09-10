@@ -2120,6 +2120,8 @@ impl App {
             )],
             Id::ResultsOpenRecordView => vec![Action::OpenRecordView],
             Id::ResultsCopyCell => vec![Action::CopyGridCell],
+            Id::ResultsCopyRowJson => vec![Action::CopyGridRowJson],
+            Id::RelationCopyRowInsertSql => vec![Action::CopyGridRowInsertSql],
             Id::ResultsCopyRow => vec![Action::CopyGridRow {
                 include_headers: false,
             }],

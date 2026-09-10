@@ -152,7 +152,7 @@ from display strings.
 | `z` in grid | `z`/`t`/`b` middle/top/bottom row alignment |
 | `[` / `]` | `t` previous/next tab aliases |
 | Relation `d` | `d` delete current row |
-| Relation `y` | `y` yank current row |
+| Grid `y` (SQL Results Data / Relation Browse) | `s` copy cell, `j` copy row as JSON; Relation also `q` INSERT SQL and `y` yank row |
 | Record View `g` | `g` first field |
 
 ## Explorer
@@ -382,7 +382,8 @@ the application mapper as contextual Help.
 | `Ctrl-d/u`, `Ctrl-f/b` | Half-page/page movement |
 | `zz/zt/zb` | Align selected row |
 | `v` | Open Record View when data exists |
-| `y` | Copy selected cell |
+| `ys` | Copy selected cell |
+| `yj` | Copy selected row as JSON |
 | `Y` | Copy selected row as TSV |
 | Application `Space Y` | Copy row with headers when grid navigation is active |
 | `o` | Switch to Output |
@@ -391,6 +392,9 @@ the application mapper as contextual Help.
 | `/` / `s` | Focus WHERE/ORDER BY when Data Query is available |
 | `F` | Filter rows by the selected cell's value (`col = value`, `IS NULL` for NULL cells); replaces the WHERE input and reruns the derived query from page one |
 | `O` | Cycle the selected column's sort: `DESC`, `ASC`, unsorted; updates the ORDER BY input and reruns like a header click |
+
+Bare `y` starts the shared grid yank prefix (`ys` / `yj`); it no longer copies the
+cell immediately.
 
 When the Result set comes from a successful, read-only, single-query SQL
 execution that supports derived queries, clicking a column header uses the
@@ -455,6 +459,9 @@ filtered until edited.
 | --- | --- |
 | `h/j/k/l`, arrows | Move through cells |
 | `gg/G`, `H/M/L`, page controls | Move rows and viewport |
+| `ys` | Copy selected cell |
+| `yj` | Copy selected row as JSON |
+| `yq` | Copy selected row as INSERT SQL |
 | `yy` | Yank current row |
 | `Y` | Copy current row as TSV |
 | `dd` | Delete current row after the real pending sequence |
@@ -470,7 +477,8 @@ filtered until edited.
 | `O` | Cycle the selected column's sort: `DESC`, `ASC`, unsorted; same as clicking the column header |
 | `r` | Refresh relation |
 
-The Relation Browse context uses `yy`/`yank row`, not SQL Results `y`/copy cell.
+SQL Results Data and Relation Browse share the `y` yank prefix: bare `y` starts
+the sequence (`ys` cell, `yj` JSON; Relation also `yq` INSERT and `yy` yank row).
 `Enter`, `[` and `]` are not executable Relation Data bindings in the current
 mapper and are not documented as actions.
 

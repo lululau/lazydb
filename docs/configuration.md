@@ -130,8 +130,9 @@ The remaining basic Explorer commands currently configurable are
 `explorer-copy-selection`, `explorer-find`, `explorer-search`,
 `explorer-new-profile`, `explorer-refresh`, and `explorer-toggle`.
 Additional Results commands are `results-open-record`, `results-copy-cell`,
-`results-copy-row`, `results-copy-row-headers`, `results-toggle-view`,
-`results-first-column`, and `results-last-column`.
+`results-copy-row-json`, `results-copy-row-insert-sql`, `results-copy-row`,
+`results-copy-row-headers`, `results-toggle-view`, `results-first-column`, and
+`results-last-column`.
 Results row alignment is configured by `results-align-middle`,
 `results-align-top`, and `results-align-bottom`.
 A key sequence remains active for 750 milliseconds by default, and

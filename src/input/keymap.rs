@@ -1699,6 +1699,12 @@ fn map_configured_navigation(
         if bindings.matches("results-copy-cell", event) {
             return Some(Action::CopyGridCell);
         }
+        if bindings.matches("results-copy-row-json", event) {
+            return Some(Action::CopyGridRowJson);
+        }
+        if bindings.matches("results-copy-row-insert-sql", event) {
+            return Some(Action::CopyGridRowInsertSql);
+        }
         if bindings.matches("results-copy-row", event) {
             return Some(Action::CopyGridRow {
                 include_headers: false,
@@ -2201,7 +2207,7 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
         }
         Pending::Previous => Some((ShortcutPrefix::Previous, "[".into())),
         Pending::Next => Some((ShortcutPrefix::Next, "]".into())),
-        Pending::GridYank => Some((ShortcutPrefix::RelationYank, "y".into())),
+        Pending::GridYank => Some((ShortcutPrefix::GridYank, "y".into())),
         Pending::RelationDelete => Some((ShortcutPrefix::RelationDelete, "d".into())),
         Pending::GridAlign => Some((ShortcutPrefix::GridAlign, "z".into())),
         Pending::RecordViewGoto => Some((ShortcutPrefix::RecordViewGoto, "g".into())),
@@ -3597,7 +3603,7 @@ mod tests {
                 .sequence_state(&relation, Instant::now())
                 .unwrap()
                 .prefix,
-            crate::help::ShortcutPrefix::RelationYank
+            crate::help::ShortcutPrefix::GridYank
         );
         keymap.clear_pending();
         assert_eq!(keymap.map(key(KeyCode::Char('d')), &relation), None);
