@@ -2111,6 +2111,40 @@ fn relation_browse_yy_maps_the_catalog_yank_row_binding() {
 }
 
 #[test]
+fn relation_browse_ys_yj_yq_and_yy_share_grid_yank_prefix() {
+    let mut app = App::new(Vec::new());
+    app.tabs
+        .push(WorkspaceTab::Relation(RelationTab::new("users")));
+    app.active_tab = 1;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::CopyGridCell)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::CopyGridRowJson)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('q')), &app),
+        Some(Action::CopyGridRowInsertSql)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('y')), &app),
+        Some(Action::RelationYank)
+    );
+}
+
+#[test]
 fn sql_help_window_directions_match_three_pane_mapping() {
     let mut app = App::new(Vec::new());
     app.focus = Focus::Explorer;
@@ -2545,6 +2579,54 @@ fn shifted_y_copies_sql_result_rows() {
             None
         );
     }
+}
+
+#[test]
+fn sql_results_ys_and_yj_use_grid_yank_prefix() {
+    let mut app = App::new(Vec::new());
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('s')), &app),
+        Some(Action::CopyGridCell)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('j')), &app),
+        Some(Action::CopyGridRowJson)
+    );
+
+    assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+    assert_eq!(keymap.map(key(KeyCode::Char('q')), &app), None);
+}
+
+#[test]
+fn dashboard_processes_keeps_immediate_y_cell_copy() {
+    let mut app = App::new(Vec::new());
+    app.tabs.clear();
+    let mut dashboard = lazydb::model::dashboard::DashboardTab::new();
+    dashboard.page = lazydb::model::dashboard::DashboardPage::Processes;
+    app.tabs.push(WorkspaceTab::Dashboard(dashboard));
+    app.active_tab = 0;
+    app.focus = Focus::Results;
+    let mut keymap = Keymap::default();
+
+    assert_eq!(
+        keymap.map(key(KeyCode::Char('y')), &app),
+        Some(Action::CopyGridCell)
+    );
+    assert_eq!(
+        keymap.map(
+            KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT),
+            &app
+        ),
+        Some(Action::CopyGridRow {
+            include_headers: false,
+        })
+    );
 }
 
 #[test]

@@ -24,7 +24,7 @@ enum Pending {
     WindowCount { count: u32 },
     Previous,
     Next,
-    RelationYank,
+    GridYank,
     RelationDelete,
     GridAlign,
     RecordViewGoto,
@@ -1195,7 +1195,24 @@ impl Keymap {
             return None;
         }
 
-        if (is_sql_grid_focus(app) || is_read_only_grid_focus(app))
+        if is_sql_grid_focus(app)
+            && (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
+        {
+            match event.code {
+                KeyCode::Char('y') => {
+                    self.set_pending(Pending::GridYank, app);
+                    return None;
+                }
+                KeyCode::Char('Y') => {
+                    return Some(Action::CopyGridRow {
+                        include_headers: false,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        if is_read_only_grid_focus(app)
             && (event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT)
         {
             match event.code {
@@ -1219,7 +1236,7 @@ impl Keymap {
                         return None;
                     }
                     KeyCode::Char('y') => {
-                        self.set_pending(Pending::RelationYank, app);
+                        self.set_pending(Pending::GridYank, app);
                         return None;
                     }
                     KeyCode::Char('Y') => {
@@ -2184,7 +2201,7 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
         }
         Pending::Previous => Some((ShortcutPrefix::Previous, "[".into())),
         Pending::Next => Some((ShortcutPrefix::Next, "]".into())),
-        Pending::RelationYank => Some((ShortcutPrefix::RelationYank, "y".into())),
+        Pending::GridYank => Some((ShortcutPrefix::RelationYank, "y".into())),
         Pending::RelationDelete => Some((ShortcutPrefix::RelationDelete, "d".into())),
         Pending::GridAlign => Some((ShortcutPrefix::GridAlign, "z".into())),
         Pending::RecordViewGoto => Some((ShortcutPrefix::RecordViewGoto, "g".into())),
@@ -2229,7 +2246,18 @@ fn map_pending(
                 include_headers: true,
             })
         }
-        (Pending::RelationYank, KeyCode::Char('y')) => Some(Action::RelationYank),
+        (Pending::GridYank, KeyCode::Char('s')) => Some(Action::CopyGridCell),
+        (Pending::GridYank, KeyCode::Char('j')) => Some(Action::CopyGridRowJson),
+        (Pending::GridYank, KeyCode::Char('q'))
+            if is_relation_data_focus(app) && relation_grid_is_browse(app) =>
+        {
+            Some(Action::CopyGridRowInsertSql)
+        }
+        (Pending::GridYank, KeyCode::Char('y'))
+            if is_relation_data_focus(app) && relation_grid_is_browse(app) =>
+        {
+            Some(Action::RelationYank)
+        }
         (Pending::Window { .. }, KeyCode::Char('w'))
             if event.modifiers == KeyModifiers::CONTROL =>
         {
