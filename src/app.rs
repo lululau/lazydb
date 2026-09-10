@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     action::{Action, Command, ProfileAccessChange, ProfileOrganizationMutation},
     cli::ConfirmationPolicy,
-    clipboard::{ClipboardPayload, copy_cell, copy_row_tsv},
+    clipboard::{ClipboardPayload, copy_cell, copy_row_insert_sql, copy_row_json, copy_row_tsv},
     db::catalog_mutation::{
         CatalogMutationAnchor, CatalogMutationMode, CatalogObjectType, CatalogOwnerChoice,
         CatalogOwnerContextRequest, CatalogSelectionHint,
@@ -1183,6 +1183,45 @@ impl App {
             .collect()
     }
 
+    fn copy_grid_row_json(&mut self) -> Vec<Command> {
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            self.notify_warning("Clipboard", "Nothing to copy in the current Data view");
+            return Vec::new();
+        };
+        copy_row_json(&columns, &row)
+            .map(|mut payload| {
+                payload.sensitive = self.active_process_grid();
+                Command::WriteClipboard(payload)
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn copy_grid_row_insert_sql(&mut self) -> Vec<Command> {
+        let Some(crate::model::tab::WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab)
+        else {
+            self.notify_warning("Clipboard", "INSERT SQL copy is only available in Relation Data");
+            return Vec::new();
+        };
+        if tab.view != crate::model::relation::RelationView::Data {
+            self.notify_warning("Clipboard", "INSERT SQL copy is only available in Relation Data");
+            return Vec::new();
+        }
+        let qualified_name = tab.descriptor.qualified_name.clone();
+        let dialect = self.sql_dialect();
+        let Some((columns, row, _, _)) = self.active_record_snapshot() else {
+            self.notify_warning("Clipboard", "Nothing to copy in the current Data view");
+            return Vec::new();
+        };
+        copy_row_insert_sql(dialect, &qualified_name, &columns, &row)
+            .map(|mut payload| {
+                payload.sensitive = self.active_process_grid();
+                Command::WriteClipboard(payload)
+            })
+            .into_iter()
+            .collect()
+    }
+
     fn grid_value_detail(
         &self,
         column: usize,
@@ -2159,6 +2198,8 @@ impl App {
                         | Action::GridSetColumnOffset { .. }
                         | Action::CopyGridCell
                         | Action::CopyGridRow { .. }
+                        | Action::CopyGridRowJson
+                        | Action::CopyGridRowInsertSql
                         | Action::ViewGridCell
                         | Action::CopyRecordViewCell
                         | Action::CopyRecordViewRow { .. }
@@ -7279,6 +7320,8 @@ impl App {
             Action::CopyEditorBuffer => self.copy_editor_buffer(),
             Action::CopyGridCell => self.copy_grid_cell(),
             Action::CopyGridRow { include_headers } => self.copy_grid_row(include_headers),
+            Action::CopyGridRowJson => self.copy_grid_row_json(),
+            Action::CopyGridRowInsertSql => self.copy_grid_row_insert_sql(),
             Action::ClipboardWriteFailed { message } => {
                 self.notify_error("Clipboard", &message);
                 Vec::new()

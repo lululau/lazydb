@@ -469,6 +469,8 @@ pub enum Action {
     CopyGridRow {
         include_headers: bool,
     },
+    CopyGridRowJson,
+    CopyGridRowInsertSql,
     ViewGridCell,
     CopyRecordViewCell,
     CopyRecordViewRow {
