@@ -52,11 +52,13 @@ Users want that view reachable in one keystroke. Relation already has a review S
    - When no transaction is open: empty state copy exactly `No open transaction`.
    - When a transaction is open but pending SQL is empty: empty state copy exactly `Open transaction — no recorded statements yet`.
    - **Enter** on PENDING:
-     - Console + open txn: close SQL Activity and open **`Overlay::TransactionExitConfirm`** for this console (same path as the existing commit/rollback confirmation entry, e.g. via the tab’s deferred/transaction-control helper used by `CommitTransaction` / exit flows).
-     - Relation + open txn: close SQL Activity and open **`Overlay::RelationTransactionConfirm`** for this relation tab (existing review overlay, including its SQL preview).
-     - No open transaction, or open txn with empty pending where Review itself is not offered: **no-op** (optional muted status line; no overlay change).
+     - Console + open txn: close SQL Activity and invoke **`open_console_transaction_control`** (the helper behind `Action::OpenTransactionControl` / deferred exit flows) so the existing **`Overlay::TransactionExitConfirm`** opens. Do **not** call `transaction_control(true)` / `Action::CommitTransaction` (those start commit directly and bypass the confirm overlay).
+     - Relation + open txn: close SQL Activity and open **`Overlay::RelationTransactionConfirm`** for this relation tab (existing review overlay, including its SQL preview), using the same construction path as today’s relation save/review entry.
+     - If the helper refuses (e.g. query still running, or no controllable txn): keep SQL Activity open and show a muted status hint; do not switch overlays.
+     - No open transaction: **no-op** (optional muted status line).
    - Do **not** commit or roll back directly from SQL Activity.
    - **y**: yank/copy the full pending SQL text to the clipboard; if empty, no-op or brief notification.
+   - **Initial focus**: PENDING section, `pending_scroll = 0`, `committed_cursor = 0`.
 
 5. **COMMITTED section**
    - Each entry is a **batch** produced by one successful Commit:
@@ -145,13 +147,16 @@ struct CommittedSqlBatch {
 
 | Event | Behavior |
 |-------|----------|
-| Manual transaction becomes Active (begin success / enter manual active) | Ensure buffer starts empty for the new txn |
-| `ManualQueryFinished` (or equivalent success path for `ManualExecute`) while txn Active | If the executed draft is **not** classified as read-only-only (i.e. has any non-`ReadOnly` risk, or statement_count mutations), **append** the executed SQL text to `pending_transaction_sql` (separate statements with a blank line). Pure read-only successful queries **do not** append. |
+| Manual transaction becomes Active (begin success / enter manual active) | Clear buffer so the new txn starts empty |
+| `ManualQueryFinished` (success path for `ManualExecute`) while txn Active | **Append** the executed SQL when the draft’s risks include any risk other than `ReadOnly` and `TransactionControl` (i.e. real DML/DDL/etc.). Pure read-only and pure transaction-control statements (`BEGIN`/`COMMIT`/`ROLLBACK`/savepoints classified only as `TransactionControl`) **do not** append. Appended segments are **blank-line-separated**. |
 | Failed manual execute | Do not append |
-| `ManualCommitted` success | Capture `pending_transaction_sql`; if non-empty, push `CommittedSqlBatch`; then clear pending buffer as part of txn idle transition |
-| `ManualRolledBack` success | Clear pending buffer; do not push committed batch |
+| `ManualCommitted` success | Capture `pending_transaction_sql`; if non-empty, push `CommittedSqlBatch`; **always clear** pending buffer |
+| `ManualRolledBack` success | **Clear** pending buffer; do not push committed batch |
 | Commit/rollback failure | Leave pending buffer unchanged (txn returns to Active / OutcomeUnknown per existing rules) |
-| Leaving manual mode / tab close | Clear pending buffer |
+| Any other transition to `TransactionState::Idle` | **Clear** pending buffer (covers `ManualImplicitlyEnded`, OutcomeUnknown abandon / `resolve_transaction_exit` abandon paths, `ClearOutcome`, leaving manual mode, and similar). Do not push a committed batch unless the transition was a successful commit handled above |
+| Tab close | Clear pending buffer with the tab |
+
+**Invariant:** whenever `transaction_state == Idle`, `pending_transaction_sql` is empty.
 
 Statement counting for a batch: number of non-empty SQL segments in the captured pending text (split on blank-line boundaries), or `max(1, segment_count)` when non-empty.
 
@@ -204,8 +209,8 @@ Do **not** append on rollback success/failure, commit failure, or auto-mode stat
 
 | Tab | Open condition | Action on Enter |
 |-----|----------------|-----------------|
-| Console | `transaction_state` indicates an open/controllable txn (Active / Aborted / OutcomeUnknown as allowed by existing commit entry) | Dismiss SQL Activity; invoke the same helper that opens `Overlay::TransactionExitConfirm` for this console (do not invent a new confirm UI) |
-| Relation | Relation has an open edit transaction / review-capable state as today | Dismiss SQL Activity; open `Overlay::RelationTransactionConfirm` with current `transaction_review_sql` (same construction as today’s save/review entry) |
+| Console | Open/controllable txn as allowed by `open_console_transaction_control` | Call `open_console_transaction_control` (via `Action::OpenTransactionControl` or direct helper). On success: SQL Activity is replaced by `Overlay::TransactionExitConfirm`. On refusal: keep SQL Activity, show hint. Never route through `Action::CommitTransaction` / `transaction_control(true)`. |
+| Relation | Relation has an open edit transaction / review-capable state as today | Open `Overlay::RelationTransactionConfirm` with current `transaction_review_sql` (same construction as today’s relation save/review entry). On refusal: keep SQL Activity, show hint. |
 
 ---
 
@@ -214,7 +219,7 @@ Do **not** append on rollback success/failure, commit failure, or auto-mode stat
 | Case | Behavior |
 |------|----------|
 | No open transaction | PENDING shows `No open transaction`; Enter no-op |
-| Open transaction, empty pending SQL | PENDING shows `Open transaction — no recorded statements yet`; Enter still opens the tab’s existing confirm overlay if that overlay can be opened today without SQL; otherwise no-op |
+| Open transaction, empty pending SQL | PENDING shows `Open transaction — no recorded statements yet`; Enter still attempts the tab’s confirm helper (`open_console_transaction_control` / Relation review open). Success replaces overlay; refusal keeps SQL Activity with hint |
 | Commit with empty pending/review SQL | No COMMITTED batch appended |
 | Tab switch / tab close while overlay open | Dismiss overlay |
 | History over 50 batches | Drop oldest |
