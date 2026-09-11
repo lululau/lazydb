@@ -90,19 +90,9 @@ git commit -m "feat(agent): record executed SQL in Agent and MCP services"
 **Files:**
 - Create: `tests/sql_logging.rs`
 
-- [ ] **Step 1: Write integration tests**
-
-Create `tests/sql_logging.rs`:
-- Test 1: Set `LAZYDB_LOG_DIR` to a `tempdir`, execute query through `SqlLogger`, verify directory structure `$LAZYDB_LOG_DIR/sql/` and filename format `lazydb_...log`.
-- Test 2: Verify line buffering: write entry, verify file content is immediately present and ends with newline.
-- Test 3: Multiple entries in sequential order with multi-line SQL formatting preserved.
-
-- [ ] **Step 2: Run integration tests to verify they pass**
-
-Run: `cargo test --test sql_logging`
-Expected: PASS
-
-- [ ] **Step 3: Commit**
+- [x] **Step 1: Write integration tests**
+- [x] **Step 2: Run integration tests to verify they pass**
+- [x] **Step 3: Commit**
 
 ```bash
 git add tests/sql_logging.rs
