@@ -9404,6 +9404,8 @@ impl App {
                 target,
                 outcome,
             } => {
+                let connection_name = self.connection_name_for(&connection);
+                let target_label = console_target_label(&target);
                 let Some(tab) = self
                     .tabs
                     .iter_mut()
@@ -9422,6 +9424,13 @@ impl App {
                 {
                     return Vec::new();
                 }
+                let sql = tab
+                    .derived
+                    .as_ref()
+                    .map(|derived| derived_sql_for_log(derived, None))
+                    .unwrap_or_default();
+                let rows = outcome.stats.row_count;
+                let elapsed = outcome.stats.total();
                 if let Some(derived) = tab.derived.as_mut() {
                     derived.running = false;
                     derived.error = None;
@@ -9429,6 +9438,16 @@ impl App {
                 }
                 tab.query.error = None;
                 tab.result_view = ResultView::Data;
+                if !sql.is_empty() {
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target: target_label,
+                        elapsed,
+                        outcome: crate::logger::SqlLogOutcome::QuerySuccess { rows },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::DerivedQueryPageFinished {
@@ -9440,6 +9459,8 @@ impl App {
                 outcome,
                 pagination,
             } => {
+                let connection_name = self.connection_name_for(&connection);
+                let target_label = console_target_label(&target);
                 let Some(tab) = self
                     .tabs
                     .iter_mut()
@@ -9458,6 +9479,13 @@ impl App {
                 {
                     return Vec::new();
                 }
+                let sql = tab
+                    .derived
+                    .as_ref()
+                    .map(|derived| derived_sql_for_log(derived, Some(&pagination)))
+                    .unwrap_or_default();
+                let rows = outcome.stats.row_count;
+                let elapsed = outcome.stats.total();
                 if let Some(derived) = tab.derived.as_mut() {
                     let previous_total = derived.pagination.total;
                     derived.running = false;
@@ -9474,6 +9502,16 @@ impl App {
                 tab.visual_anchor = None;
                 tab.query.error = None;
                 tab.result_view = ResultView::Data;
+                if !sql.is_empty() {
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target: target_label,
+                        elapsed,
+                        outcome: crate::logger::SqlLogOutcome::QuerySuccess { rows },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::DerivedQueryFailed {
@@ -9484,6 +9522,8 @@ impl App {
                 target,
                 message,
             } => {
+                let connection_name = self.connection_name_for(&connection);
+                let target_label = console_target_label(&target);
                 let Some(tab) = self
                     .tabs
                     .iter_mut()
@@ -9502,12 +9542,27 @@ impl App {
                 {
                     return Vec::new();
                 }
+                let sql = tab
+                    .derived
+                    .as_ref()
+                    .map(|derived| derived_sql_for_log(derived, None))
+                    .unwrap_or_default();
                 let message = crate::security::sanitize_terminal_text(&message);
                 if let Some(derived) = tab.derived.as_mut() {
                     derived.running = false;
                     derived.error = Some(message.clone());
                 }
-                tab.query.error = Some(message);
+                tab.query.error = Some(message.clone());
+                if !sql.is_empty() {
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target: target_label,
+                        elapsed: Duration::ZERO,
+                        outcome: crate::logger::SqlLogOutcome::Failure { message },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::DerivedQueryPageFailed {
@@ -9518,6 +9573,8 @@ impl App {
                 target,
                 message,
             } => {
+                let connection_name = self.connection_name_for(&connection);
+                let target_label = console_target_label(&target);
                 let Some(tab) = self
                     .tabs
                     .iter_mut()
@@ -9536,12 +9593,27 @@ impl App {
                 {
                     return Vec::new();
                 }
+                let sql = tab
+                    .derived
+                    .as_ref()
+                    .map(|derived| derived_sql_for_log(derived, Some(&derived.pagination)))
+                    .unwrap_or_default();
                 let message = crate::security::sanitize_terminal_text(&message);
                 if let Some(derived) = tab.derived.as_mut() {
                     derived.running = false;
                     derived.error = Some(message.clone());
                 }
-                tab.query.error = Some(message);
+                tab.query.error = Some(message.clone());
+                if !sql.is_empty() {
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target: target_label,
+                        elapsed: Duration::ZERO,
+                        outcome: crate::logger::SqlLogOutcome::Failure { message },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::ManualStarted {
@@ -16680,25 +16752,45 @@ impl App {
         &mut self,
         tab_id: Uuid,
         generation: u64,
-        _connection: ConnectionIdentity,
+        connection: ConnectionIdentity,
         success: bool,
         error: Option<(String, bool)>,
     ) -> Vec<Command> {
         let mut committed = false;
         let mut matched = false;
+        let mut sql_log: Option<(String, String, crate::logger::SqlLogOutcome)> = None;
+        let connection_name = self.connection_name_for(&connection);
         if let Some(WorkspaceTab::Relation(tab)) = self.tabs.iter_mut().find(|t| t.id() == tab_id) {
             if tab.transaction_generation != generation {
                 return Vec::new();
             }
             matched = true;
+            let was_rolling_back = tab.transaction_state == TransactionState::RollingBack;
+            let was_committing = tab.transaction_state == TransactionState::Committing;
+            let review_sql = tab.transaction_review_sql.clone();
+            let target = tab.descriptor.title.clone();
             if success {
-                if tab.transaction_state == TransactionState::RollingBack {
+                if was_rolling_back {
                     tab.edit = tab.transaction_snapshot.clone();
-                } else if tab.transaction_state == TransactionState::Committing
-                    && let Some(edit) = tab.edit.as_mut()
-                {
-                    edit.commit_changes();
-                    committed = true;
+                    sql_log = Some((
+                        target,
+                        "ROLLBACK;".to_owned(),
+                        crate::logger::SqlLogOutcome::MutationSuccess { affected_rows: 0 },
+                    ));
+                } else if was_committing {
+                    if let Some(edit) = tab.edit.as_mut() {
+                        edit.commit_changes();
+                        committed = true;
+                    }
+                    let sql = match review_sql.filter(|sql| !sql.is_empty()) {
+                        Some(review) => format!("COMMIT;\n\n{review}"),
+                        None => "COMMIT;".to_owned(),
+                    };
+                    sql_log = Some((
+                        target,
+                        sql,
+                        crate::logger::SqlLogOutcome::MutationSuccess { affected_rows: 0 },
+                    ));
                 }
                 tab.transaction_snapshot = None;
                 tab.transaction_review_sql = None;
@@ -16709,7 +16801,33 @@ impl App {
                 } else {
                     TransactionState::Active
                 };
+                if was_committing || was_rolling_back {
+                    let sql = if was_rolling_back {
+                        "ROLLBACK;".to_owned()
+                    } else {
+                        "COMMIT;".to_owned()
+                    };
+                    let message = error
+                        .as_ref()
+                        .map(|(message, _)| message.clone())
+                        .unwrap_or_else(|| "relation transaction failed".to_owned());
+                    sql_log = Some((
+                        target,
+                        sql,
+                        crate::logger::SqlLogOutcome::Failure { message },
+                    ));
+                }
             }
+        }
+        if let Some((target, sql, outcome)) = sql_log {
+            self.sql_logger.log(crate::logger::SqlLogRecord {
+                timestamp: chrono::Local::now(),
+                connection: connection_name,
+                target,
+                elapsed: Duration::ZERO,
+                outcome,
+                sql,
+            });
         }
         if let Some((ref message, _)) = error {
             self.notify_error("Relation", message.as_str());
@@ -17368,11 +17486,14 @@ impl App {
         if !self.relation_result_is_current(&request, current) {
             return Vec::new();
         }
+        let target = current.descriptor.title.clone();
+        let connection_name = self.connection_name_for(&request.connection);
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(tab_index) else {
             return Vec::new();
         };
         let mut continue_save = false;
         let mut metadata_error = None;
+        let mut sql_log: Option<(Duration, crate::logger::SqlLogOutcome, String)> = None;
         match (request.kind, result) {
             (RelationRequestKind::Preview, Ok(RelationSnapshot::Preview(snapshot))) => {
                 if matches!(&tab.data, RelationLoad::Loading { request: pending, .. } if pending == &request)
@@ -17384,6 +17505,13 @@ impl App {
                         .result_sets
                         .last()
                         .map(|result| result.rows.clone());
+                    sql_log = Some((
+                        snapshot.result.stats.total(),
+                        crate::logger::SqlLogOutcome::QuerySuccess {
+                            rows: snapshot.result.stats.row_count,
+                        },
+                        snapshot.sql.clone(),
+                    ));
                     tab.data = RelationLoad::Ready(crate::model::relation::OwnedSnapshot {
                         value: snapshot,
                         attribution: crate::model::relation::SnapshotAttribution {
@@ -17429,6 +17557,13 @@ impl App {
                 } = &tab.data
                     && pending == &request
                 {
+                    sql_log = Some((
+                        Duration::ZERO,
+                        crate::logger::SqlLogOutcome::Failure {
+                            message: message.clone(),
+                        },
+                        format!("-- Relation preview: {target}"),
+                    ));
                     tab.data = RelationLoad::Failed {
                         message,
                         previous: previous.clone(),
@@ -17455,6 +17590,16 @@ impl App {
                 }
             }
             _ => {}
+        }
+        if let Some((elapsed, outcome, sql)) = sql_log {
+            self.sql_logger.log(crate::logger::SqlLogRecord {
+                timestamp: chrono::Local::now(),
+                connection: connection_name,
+                target,
+                elapsed,
+                outcome,
+                sql,
+            });
         }
         let should_continue = continue_save && tab_index == self.active_tab;
         let _ = tab;
@@ -17839,6 +17984,47 @@ fn console_target_label(target: &ExecutionTarget) -> String {
         Some(schema) => format!("{}.{}", target.database, schema),
         None => target.database.clone(),
     })
+}
+
+fn derived_sql_for_log(
+    derived: &DerivedResultState,
+    page: Option<&crate::model::pagination::ResultPagination>,
+) -> String {
+    let where_clause = derived.query.where_clause.as_deref().unwrap_or("");
+    let order_by_clause = derived.query.order_by_clause.as_deref().unwrap_or("");
+    let source = &derived.source.draft.sql;
+    let dialect = derived.source.draft.dialect;
+    let page_request = match page {
+        Some(pagination) => crate::model::pagination::PageRequest {
+            size: pagination.page_size,
+            offset: pagination.offset,
+            resolve_total: false,
+        },
+        None => crate::model::pagination::PageRequest::first(Default::default()),
+    };
+    match sql::build_derived_paginated_query(
+        source,
+        where_clause,
+        order_by_clause,
+        dialect,
+        page_request,
+    ) {
+        Ok(query) => query.page_sql,
+        Err(_) => {
+            let mut annotated = source.clone();
+            let mut notes = Vec::new();
+            if !where_clause.is_empty() {
+                notes.push(format!("WHERE {where_clause}"));
+            }
+            if !order_by_clause.is_empty() {
+                notes.push(format!("ORDER BY {order_by_clause}"));
+            }
+            if !notes.is_empty() {
+                annotated.push_str(&format!(" /* {} */", notes.join(" ")));
+            }
+            annotated
+        }
+    }
 }
 
 fn catalog_drop_target_label(plan: &crate::db::catalog_drop::CatalogDropPlan) -> String {
@@ -22577,5 +22763,428 @@ mod tests {
 
         let content = wait_for_log_content(&log_path, |c| c.contains("table already exists")).await;
         assert!(content.contains("[ERROR 0ms: table already exists]"));
+    }
+
+    #[tokio::test]
+    async fn relation_commit_records_review_sql_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_generation = 3;
+        tab.transaction_state = TransactionState::Committing;
+        tab.transaction_review_sql =
+            Some("UPDATE \"public\".\"users\" SET name = 'ada' WHERE id = 1;".into());
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("ada".into()),
+        ]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+
+        app.relation_transaction_finished(
+            tab_id,
+            3,
+            ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("UPDATE \"public\".\"users\" SET name = 'ada' WHERE id = 1;")
+        })
+        .await;
+        assert!(content.contains("[kms/public.users]"));
+        assert!(content.contains("0 row(s) affected"));
+        assert!(content.contains("COMMIT;"));
+        assert!(content.contains("UPDATE \"public\".\"users\" SET name = 'ada' WHERE id = 1;"));
+    }
+
+    #[tokio::test]
+    async fn relation_rollback_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_generation = 2;
+        tab.transaction_state = TransactionState::RollingBack;
+        tab.transaction_review_sql = Some("DELETE FROM \"public\".\"users\" WHERE id = 1;".into());
+        let snapshot = RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]);
+        tab.transaction_snapshot = Some(snapshot.clone());
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("changed".into()),
+        ]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+
+        app.relation_transaction_finished(
+            tab_id,
+            2,
+            ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("ROLLBACK;")).await;
+        assert!(content.contains("[kms/public.users]"));
+        assert!(content.contains("0 row(s) affected"));
+        assert!(content.contains("ROLLBACK;"));
+    }
+
+    #[tokio::test]
+    async fn relation_commit_failed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_generation = 4;
+        tab.transaction_state = TransactionState::Committing;
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+
+        app.relation_transaction_finished(
+            tab_id,
+            4,
+            ConnectionIdentity {
+                profile_id,
+                generation: 1,
+            },
+            false,
+            Some(("could not commit relation changes".into(), false)),
+        );
+
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("could not commit relation changes")
+        })
+        .await;
+        assert!(content.contains("[kms/public.users]"));
+        assert!(content.contains("[ERROR 0ms: could not commit relation changes]"));
+        assert!(content.contains("COMMIT;"));
+    }
+
+    #[tokio::test]
+    async fn relation_preview_records_sql_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let mut profile = import_connection_url("sqlite::memory:", Some("test"))
+            .unwrap()
+            .profile;
+        profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::Sqlite, "", None);
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let tab = RelationTab::new("users");
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+
+        let relation = match &app.tabs[app.active_tab] {
+            WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
+            _ => unreachable!(),
+        };
+        let scope = app.profiles[0].catalog_scope.clone();
+        let request = RelationRequest {
+            tab_id,
+            tab_generation: 0,
+            request_id: 1,
+            connection: app.connection.active_identity().unwrap(),
+            relation,
+            kind: RelationRequestKind::Preview,
+            scope,
+            options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
+        };
+        let request_page = request.page;
+        if let WorkspaceTab::Relation(tab) = &mut app.tabs[app.active_tab] {
+            tab.data = RelationLoad::Loading {
+                request: request.clone(),
+                previous: None,
+            };
+        }
+
+        let result = ResultSet {
+            columns: vec![ColumnMeta {
+                name: "id".into(),
+                type_name: "integer".into(),
+            }],
+            rows: vec![vec![CellValue::Integer(1)]],
+            affected_rows: 0,
+        };
+        app.update(Action::RelationSucceeded {
+            request,
+            snapshot: Box::new(RelationSnapshot::Preview(crate::db::RelationPreview {
+                sql: "SELECT * FROM users ORDER BY id LIMIT 501 OFFSET 0".into(),
+                result: QueryOutcome {
+                    result_sets: vec![result],
+                    stats: QueryStats::new(Duration::from_millis(8), Duration::from_millis(2), 1),
+                },
+                pagination: crate::model::pagination::ResultPagination::from_page(request_page, 1),
+                row_versions: None,
+            })),
+        });
+
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("SELECT * FROM users ORDER BY id LIMIT 501 OFFSET 0")
+        })
+        .await;
+        assert!(content.contains("[test/users]"));
+        assert!(content.contains("[OK 10ms 1 rows]"));
+        assert!(content.contains("SELECT * FROM users ORDER BY id LIMIT 501 OFFSET 0"));
+    }
+
+    #[tokio::test]
+    async fn relation_preview_failed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let mut profile = import_connection_url("sqlite::memory:", Some("test"))
+            .unwrap()
+            .profile;
+        profile.catalog_scope = CatalogScope::for_profile(DatabaseKind::Sqlite, "", None);
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let tab = RelationTab::new("users");
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+
+        let relation = match &app.tabs[app.active_tab] {
+            WorkspaceTab::Relation(tab) => tab.descriptor.key.clone(),
+            _ => unreachable!(),
+        };
+        let scope = app.profiles[0].catalog_scope.clone();
+        let request = RelationRequest {
+            tab_id,
+            tab_generation: 0,
+            request_id: 2,
+            connection: app.connection.active_identity().unwrap(),
+            relation,
+            kind: RelationRequestKind::Preview,
+            scope,
+            options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
+        };
+        if let WorkspaceTab::Relation(tab) = &mut app.tabs[app.active_tab] {
+            tab.data = RelationLoad::Loading {
+                request: request.clone(),
+                previous: None,
+            };
+        }
+
+        app.update(Action::RelationFailed {
+            request,
+            message: "no such table: users".into(),
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("no such table: users")).await;
+        assert!(content.contains("[test/users]"));
+        assert!(content.contains("[ERROR 0ms: no such table: users]"));
+        assert!(content.contains("-- Relation preview: users"));
+    }
+
+    #[tokio::test]
+    async fn derived_query_page_finished_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id, name FROM users");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("one".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::from_millis(5), Duration::ZERO, 1),
+            },
+        });
+
+        {
+            let tab = app.active_console_mut();
+            tab.query.where_input.set("id > 0");
+            tab.query.order_by_input.set("\"id\" DESC");
+            tab.query.submitted = DataQueryOptions {
+                where_clause: Some("id > 0".into()),
+                order_by_clause: Some("\"id\" DESC".into()),
+            };
+            let source = tab.last_execution.clone().unwrap();
+            tab.derived = Some(DerivedResultState {
+                source,
+                query: tab.query.submitted.clone(),
+                generation: 1,
+                outcome: None,
+                error: None,
+                running: true,
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
+            });
+        }
+
+        let target = app.active_console().execution_target.clone().unwrap();
+        let pagination = crate::model::pagination::ResultPagination::from_page(
+            crate::model::pagination::PageRequest::at(crate::model::pagination::PageSize::Ten, 10),
+            1,
+        );
+        app.update(Action::DerivedQueryPageFinished {
+            tab_id,
+            source_generation: generation,
+            derived_generation: 1,
+            connection,
+            target,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(2), CellValue::Text("two".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::from_millis(7), Duration::from_millis(1), 1),
+            },
+            pagination,
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("__lazydb_result")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[OK 8ms 1 rows]"));
+        assert!(content.contains("id > 0"));
+        assert!(content.contains("\"id\" DESC"));
+        assert!(content.contains("OFFSET 10"));
+    }
+
+    #[tokio::test]
+    async fn derived_query_page_failed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id FROM users");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+
+        {
+            let tab = app.active_console_mut();
+            tab.query.submitted = DataQueryOptions {
+                where_clause: Some("id > 10".into()),
+                order_by_clause: Some("id DESC".into()),
+            };
+            let source = tab.last_execution.clone().unwrap();
+            tab.derived = Some(DerivedResultState {
+                source,
+                query: tab.query.submitted.clone(),
+                generation: 2,
+                outcome: None,
+                error: None,
+                running: true,
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    0,
+                ),
+            });
+        }
+
+        let target = app.active_console().execution_target.clone().unwrap();
+        app.update(Action::DerivedQueryPageFailed {
+            tab_id,
+            source_generation: generation,
+            derived_generation: 2,
+            connection,
+            target,
+            message: "column \"missing\" does not exist".into(),
+        });
+
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("column \"missing\" does not exist")
+        })
+        .await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: column \"missing\" does not exist]"));
+        assert!(content.contains("__lazydb_result"));
+        assert!(content.contains("id > 10"));
     }
 }
