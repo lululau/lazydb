@@ -181,7 +181,7 @@ application settings. The grouped keybinding tables contain `help`,
 events or space-separated key sequences such as `F2`, `Ctrl-c`, `Shift-Tab`,
 or `g t`; empty lists unbind a command. The current Leader commands are
 `open-dashboard`, `open-explorer`, `open-editors`, `run-leader-statement`,
-`run-leader-buffer`, and `open-target-selector`.
+`run-leader-buffer`, `open-target-selector`, and `sql-activity`.
 The pane commands are `focus-pane-left`, `focus-pane-down`, `focus-pane-up`,
 `focus-pane-right`, `toggle-pane-maximized`, and `reset-pane-sizes`.
 The Explorer navigation commands are `explorer-move-down`, `explorer-move-up`,

@@ -492,6 +492,33 @@ impl Keymap {
                 _ => None,
             };
         }
+        if let Some(Overlay::SqlActivity(state)) = app.overlay.as_ref() {
+            self.pending = None;
+            let section = state.section;
+            return match event.code {
+                KeyCode::Esc | KeyCode::Char('q') => Some(Action::SqlActivityDismiss),
+                KeyCode::Tab => Some(Action::SqlActivityToggleSection),
+                KeyCode::Enter | KeyCode::Char(' ') => Some(Action::SqlActivityEnter),
+                KeyCode::Char('y') => Some(Action::SqlActivityYank),
+                KeyCode::Up | KeyCode::Char('k') => match section {
+                    crate::model::workspace::SqlActivitySection::Pending => {
+                        Some(Action::SqlActivityPendingScroll(-1))
+                    }
+                    crate::model::workspace::SqlActivitySection::Committed => {
+                        Some(Action::SqlActivityCommittedMove(-1))
+                    }
+                },
+                KeyCode::Down | KeyCode::Char('j') => match section {
+                    crate::model::workspace::SqlActivitySection::Pending => {
+                        Some(Action::SqlActivityPendingScroll(1))
+                    }
+                    crate::model::workspace::SqlActivitySection::Committed => {
+                        Some(Action::SqlActivityCommittedMove(1))
+                    }
+                },
+                _ => None,
+            };
+        }
         if let Some(Overlay::NotificationHistory(history)) = app.overlay.as_ref() {
             self.pending = None;
             if history.clear_confirm {
@@ -2366,6 +2393,7 @@ fn configured_command_action(command: &str, app: &App) -> Option<Action> {
         "run-leader-statement" => Some(Action::RunActiveSql),
         "run-leader-buffer" => Some(Action::RunAllSql),
         "open-target-selector" => Some(Action::OpenTargetSelector),
+        "sql-activity" => Some(Action::OpenSqlActivity),
         "results-copy-row-headers" if is_grid_navigation_focus(app) => Some(Action::CopyGridRow {
             include_headers: true,
         }),
@@ -4390,6 +4418,7 @@ mod tests {
             ('r', Action::RunActiveSql),
             ('R', Action::RunAllSql),
             ('d', Action::OpenTargetSelector),
+            ('a', Action::OpenSqlActivity),
         ] {
             keymap.clear_pending();
             assert_eq!(keymap.map(key(KeyCode::Char(' ')), &app), None);
@@ -4398,6 +4427,53 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+
+    #[test]
+    fn sql_activity_overlay_maps_local_keys() {
+        let mut app = App::new(Vec::new());
+        app.update(Action::NewConsole);
+        let tab_id = app.active_console().id;
+        app.overlay = Some(Overlay::SqlActivity(
+            crate::model::workspace::SqlActivityState {
+                tab_id,
+                section: crate::model::workspace::SqlActivitySection::Pending,
+                pending_scroll: 0,
+                committed_cursor: 0,
+                expanded: Default::default(),
+                status_hint: None,
+            },
+        ));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('j')), &app),
+            Some(Action::SqlActivityPendingScroll(1))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Tab), &app),
+            Some(Action::SqlActivityToggleSection)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Enter), &app),
+            Some(Action::SqlActivityEnter)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('y')), &app),
+            Some(Action::SqlActivityYank)
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Esc), &app),
+            Some(Action::SqlActivityDismiss)
+        );
+
+        if let Some(Overlay::SqlActivity(state)) = app.overlay.as_mut() {
+            state.section = crate::model::workspace::SqlActivitySection::Committed;
+        }
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('k')), &app),
+            Some(Action::SqlActivityCommittedMove(-1))
+        );
     }
 
     #[test]

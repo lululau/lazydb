@@ -33,6 +33,7 @@ const SUPPORTED_COMMANDS: &[&str] = &[
     "run-leader-statement",
     "run-leader-buffer",
     "open-target-selector",
+    "sql-activity",
     "focus-pane-left",
     "focus-pane-down",
     "focus-pane-up",
@@ -760,6 +761,13 @@ mod tests {
             &[
                 KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
                 KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            ]
+        ));
+        assert!(bindings.matches_sequence(
+            "sql-activity",
+            &[
+                KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
             ]
         ));
     }

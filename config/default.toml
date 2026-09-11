@@ -79,6 +79,8 @@ run-leader-statement = ["Space r"]
 run-leader-buffer = ["Space R"]
 # Space-d opens the execution target selector.
 open-target-selector = ["Space d"]
+# Space-a opens SQL Activity for the current console/relation tab.
+sql-activity = ["Space a"]
 
 [keybindings.panes]
 # Ctrl-w h focuses the left pane.
