@@ -25,7 +25,7 @@ pub struct AgentService {
     project: AgentProjectContext,
     profiles: Vec<ConnectionProfile>,
     credential_resolver: CredentialResolver,
-    pub sql_logger: SqlLogger,
+    sql_logger: SqlLogger,
     max_rows: usize,
     max_result_bytes: usize,
 }
@@ -52,7 +52,9 @@ impl AgentService {
             Arc::new(NativeSecretStore),
             LocalCredentialStore::from_paths(&paths, "lazydb"),
         );
-        Ok(Self::new(project, profiles, credentials))
+        let (sql_logger, _) = SqlLogger::init(None)
+            .unwrap_or_else(|_| (SqlLogger::noop(), std::path::PathBuf::new()));
+        Ok(Self::new(project, profiles, credentials).with_sql_logger(sql_logger))
     }
 
     pub fn new(
@@ -60,13 +62,11 @@ impl AgentService {
         profiles: Vec<ConnectionProfile>,
         credential_resolver: CredentialResolver,
     ) -> Self {
-        let (sql_logger, _) = SqlLogger::init(None)
-            .unwrap_or_else(|_| (SqlLogger::noop(), std::path::PathBuf::new()));
         Self {
             project,
             profiles,
             credential_resolver,
-            sql_logger,
+            sql_logger: SqlLogger::noop(),
             max_rows: DEFAULT_MAX_ROWS,
             max_result_bytes: DEFAULT_MAX_RESULT_BYTES,
         }
@@ -113,6 +113,29 @@ impl AgentService {
         })
     }
 
+    fn log_sql(
+        &self,
+        profile: &ConnectionProfile,
+        elapsed: std::time::Duration,
+        outcome: SqlLogOutcome,
+        sql: &str,
+    ) {
+        let target = match (&profile.database, &profile.default_schema) {
+            (Some(db), Some(schema)) if !schema.is_empty() => format!("{db}.{schema}"),
+            (Some(db), _) => db.clone(),
+            (None, Some(schema)) => schema.clone(),
+            (None, None) => String::new(),
+        };
+        self.sql_logger.log(SqlLogRecord {
+            timestamp: chrono::Local::now(),
+            connection: profile.name.clone(),
+            target,
+            elapsed,
+            outcome,
+            sql: sql.to_owned(),
+        });
+    }
+
     pub async fn query(
         &self,
         selector: Option<&str>,
@@ -135,16 +158,14 @@ impl AgentService {
         let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
             .await
             .map_err(|error| {
-                self.sql_logger.log(SqlLogRecord {
-                    timestamp: chrono::Local::now(),
-                    connection: selected.profile.name.clone(),
-                    target: selected.profile.database.clone().unwrap_or_default(),
-                    elapsed: start.elapsed(),
-                    outcome: SqlLogOutcome::Failure {
+                self.log_sql(
+                    selected.profile,
+                    start.elapsed(),
+                    SqlLogOutcome::Failure {
                         message: error.to_string(),
                     },
-                    sql: sql.to_owned(),
-                });
+                    sql,
+                );
                 AgentError {
                     code: super::selection::AgentErrorCode::DatabaseFailure,
                     message: error.to_string(),
@@ -161,31 +182,27 @@ impl AgentService {
             .await;
         connection.close().await;
         let outcome = outcome.map_err(|error| {
-            self.sql_logger.log(SqlLogRecord {
-                timestamp: chrono::Local::now(),
-                connection: selected.profile.name.clone(),
-                target: selected.profile.database.clone().unwrap_or_default(),
-                elapsed: start.elapsed(),
-                outcome: SqlLogOutcome::Failure {
+            self.log_sql(
+                selected.profile,
+                start.elapsed(),
+                SqlLogOutcome::Failure {
                     message: error.to_string(),
                 },
-                sql: sql.to_owned(),
-            });
+                sql,
+            );
             AgentError {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
                 message: error.to_string(),
             }
         })?;
-        self.sql_logger.log(SqlLogRecord {
-            timestamp: chrono::Local::now(),
-            connection: selected.profile.name.clone(),
-            target: selected.profile.database.clone().unwrap_or_default(),
-            elapsed: start.elapsed(),
-            outcome: SqlLogOutcome::QuerySuccess {
+        self.log_sql(
+            selected.profile,
+            outcome.stats.total(),
+            SqlLogOutcome::QuerySuccess {
                 rows: outcome.stats.row_count,
             },
-            sql: sql.to_owned(),
-        });
+            sql,
+        );
         let json = QueryOutcomeJson::from(outcome);
         Ok(AgentQueryResult {
             target: AgentTarget {
@@ -253,16 +270,14 @@ impl AgentService {
         let connection = DatabaseConnection::connect(selected.profile, password.as_ref())
             .await
             .map_err(|error| {
-                self.sql_logger.log(SqlLogRecord {
-                    timestamp: chrono::Local::now(),
-                    connection: selected.profile.name.clone(),
-                    target: selected.profile.database.clone().unwrap_or_default(),
-                    elapsed: start.elapsed(),
-                    outcome: SqlLogOutcome::Failure {
+                self.log_sql(
+                    selected.profile,
+                    start.elapsed(),
+                    SqlLogOutcome::Failure {
                         message: error.to_string(),
                     },
-                    sql: sql.to_owned(),
-                });
+                    sql,
+                );
                 AgentError {
                     code: super::selection::AgentErrorCode::DatabaseFailure,
                     message: error.to_string(),
@@ -279,16 +294,14 @@ impl AgentService {
             .await;
         connection.close().await;
         let outcome = result.map_err(|error| {
-            self.sql_logger.log(SqlLogRecord {
-                timestamp: chrono::Local::now(),
-                connection: selected.profile.name.clone(),
-                target: selected.profile.database.clone().unwrap_or_default(),
-                elapsed: start.elapsed(),
-                outcome: SqlLogOutcome::Failure {
+            self.log_sql(
+                selected.profile,
+                start.elapsed(),
+                SqlLogOutcome::Failure {
                     message: error.to_string(),
                 },
-                sql: sql.to_owned(),
-            });
+                sql,
+            );
             AgentError {
                 code: super::selection::AgentErrorCode::DatabaseFailure,
                 message: error.to_string(),
@@ -299,14 +312,12 @@ impl AgentService {
             .iter()
             .map(|r| r.affected_rows)
             .sum::<u64>();
-        self.sql_logger.log(SqlLogRecord {
-            timestamp: chrono::Local::now(),
-            connection: selected.profile.name.clone(),
-            target: selected.profile.database.clone().unwrap_or_default(),
-            elapsed: start.elapsed(),
-            outcome: SqlLogOutcome::MutationSuccess { affected_rows },
-            sql: sql.to_owned(),
-        });
+        self.log_sql(
+            selected.profile,
+            outcome.stats.total(),
+            SqlLogOutcome::MutationSuccess { affected_rows },
+            sql,
+        );
         Ok(AgentQueryResult {
             target: AgentTarget {
                 connection: project_connection(selected.profile, selected.scope),
