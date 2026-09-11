@@ -33,10 +33,11 @@ pub fn resolve_log_dir_with(env_var: Option<&OsStr>) -> PathBuf {
             return PathBuf::from(val);
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            return PathBuf::from(home).join("logs/lazydb");
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|s| !s.is_empty()))
+    {
+        return PathBuf::from(home).join("logs/lazydb");
     }
     std::env::temp_dir().join("lazydb/logs")
 }
@@ -50,6 +51,11 @@ pub fn get_sanitized_hostname() -> String {
         .ok()
         .filter(|s| !s.trim().is_empty())
         .or_else(|| std::env::var("HOST").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .or_else(|| {
             std::process::Command::new("hostname")
                 .output()
@@ -115,17 +121,23 @@ pub fn format_log_entry(record: &SqlLogRecord) -> String {
             )
         }
         SqlLogOutcome::Failure { message } => {
-            format!("ERROR {}ms: {}", record.elapsed.as_millis(), message)
+            let sanitized_message = message.replace('\n', " ");
+            format!(
+                "ERROR {}ms: {}",
+                record.elapsed.as_millis(),
+                sanitized_message
+            )
         }
     };
 
-    format!(
-        "[{}] [{}] [{}]\n{}\n\n",
+    let header = format!(
+        "[{}] [{}] [{}]",
         record.timestamp.format("%Y-%m-%d %H:%M:%S%.3f %:z"),
         conn_target,
-        status_str,
-        record.sql
-    )
+        status_str
+    );
+
+    format!("{header}\n{}\n\n", record.sql.trim_end())
 }
 
 impl SqlLogger {
@@ -134,6 +146,9 @@ impl SqlLogger {
     }
 
     pub fn init(base_log_dir: Option<PathBuf>) -> Result<(Self, PathBuf), std::io::Error> {
+        let handle = tokio::runtime::Handle::try_current()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
         let base_dir = base_log_dir.unwrap_or_else(resolve_log_dir);
         let sql_dir = base_dir.join("sql");
         std::fs::create_dir_all(&sql_dir)?;
@@ -149,7 +164,7 @@ impl SqlLogger {
 
         let (sender, mut receiver) = unbounded_channel::<SqlLogRecord>();
 
-        tokio::spawn(async move {
+        handle.spawn(async move {
             while let Some(record) = receiver.recv().await {
                 let entry = format_log_entry(&record);
                 if writer.write_all(entry.as_bytes()).is_err() {
@@ -196,11 +211,12 @@ mod tests {
     #[test]
     fn resolve_log_dir_defaults_to_home_logs_lazydb() {
         let resolved = resolve_log_dir_with(None);
-        if let Some(home) = std::env::var_os("HOME") {
-            if !home.is_empty() {
-                assert_eq!(resolved, PathBuf::from(home).join("logs/lazydb"));
-                return;
-            }
+        if let Some(home) = std::env::var_os("HOME")
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var_os("USERPROFILE").filter(|s| !s.is_empty()))
+        {
+            assert_eq!(resolved, PathBuf::from(home).join("logs/lazydb"));
+            return;
         }
         assert_eq!(resolved, std::env::temp_dir().join("lazydb/logs"));
     }
@@ -279,6 +295,26 @@ mod tests {
         assert_eq!(formatted, expected);
     }
 
+    #[test]
+    fn format_record_failure_multiline_sanitized_and_sql_trimmed() {
+        let timestamp = chrono::Local::now();
+        let record = SqlLogRecord {
+            timestamp,
+            connection: "dev_db".to_string(),
+            target: "".to_string(),
+            elapsed: Duration::from_millis(5),
+            outcome: SqlLogOutcome::Failure {
+                message: "line1\nline2\nline3".to_string(),
+            },
+            sql: "SELECT 1;\n\n".to_string(),
+        };
+
+        let formatted = format_log_entry(&record);
+        let ts_str = timestamp.format("%Y-%m-%d %H:%M:%S%.3f %:z").to_string();
+        let expected = format!("[{ts_str}] [dev_db] [ERROR 5ms: line1 line2 line3]\nSELECT 1;\n\n");
+        assert_eq!(formatted, expected);
+    }
+
     #[tokio::test]
     async fn sql_logger_writes_and_flushes_to_file() {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -299,11 +335,29 @@ mod tests {
 
         logger.log(record.clone());
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        let content = std::fs::read_to_string(&log_path).expect("failed to read log file");
         let expected_entry = format_log_entry(&record);
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_millis(500);
+        let mut content = String::new();
+        while start.elapsed() < timeout {
+            if let Ok(c) = std::fs::read_to_string(&log_path) {
+                if c == expected_entry {
+                    content = c;
+                    break;
+                }
+                content = c;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         assert_eq!(content, expected_entry);
+    }
+
+    #[test]
+    fn sql_logger_init_outside_tokio_returns_error() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let result = SqlLogger::init(Some(temp_dir.path().to_path_buf()));
+        assert!(result.is_err());
     }
 
     #[test]
