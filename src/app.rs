@@ -8220,6 +8220,7 @@ impl App {
             Action::SqlActivityToggleExpand => self.sql_activity_toggle_expand(),
             Action::SqlActivityEnter => self.sql_activity_enter(),
             Action::SqlActivityYank => self.sql_activity_yank(),
+            Action::SqlActivityYankAll => self.sql_activity_yank_all(),
             Action::SqlActivityDismiss => self.sql_activity_dismiss(),
             Action::OpenTransactionMenu => {
                 if self.active_console_opt().is_some() {
@@ -11163,12 +11164,17 @@ impl App {
         };
         match tab {
             WorkspaceTab::Sql(_) | WorkspaceTab::Relation(_) => {
+                let batch_count = match tab {
+                    WorkspaceTab::Sql(tab) => tab.committed_sql_batches.len(),
+                    WorkspaceTab::Relation(tab) => tab.committed_sql_batches.len(),
+                    WorkspaceTab::Dashboard(_) => 0,
+                };
                 self.overlay = Some(Overlay::SqlActivity(SqlActivityState {
                     tab_id: tab.id(),
                     section: SqlActivitySection::Pending,
                     pending_scroll: 0,
                     committed_cursor: 0,
-                    expanded: BTreeSet::new(),
+                    expanded: (0..batch_count).collect(),
                     status_hint: None,
                 }));
             }
@@ -11315,14 +11321,27 @@ impl App {
         commands
     }
 
+    fn sql_activity_pending_text_for_tab(&self, tab_id: Uuid) -> String {
+        match self.tabs.iter().find(|tab| tab.id() == tab_id) {
+            Some(WorkspaceTab::Sql(tab)) => tab.pending_transaction_sql.clone(),
+            Some(WorkspaceTab::Relation(tab)) => {
+                crate::model::relation_review::activity_pending_sql(tab)
+            }
+            _ => String::new(),
+        }
+    }
+
     fn sql_activity_focused_text(&self) -> Option<(SqlActivitySection, String)> {
         let state = self.sql_activity_state()?;
         let tab_id = state.tab_id;
         let section = state.section;
         let cursor = state.committed_cursor;
+        let pending_scroll = state.pending_scroll;
         let text = match self.tabs.iter().find(|tab| tab.id() == tab_id) {
             Some(WorkspaceTab::Sql(tab)) => match section {
-                SqlActivitySection::Pending => tab.pending_transaction_sql.clone(),
+                SqlActivitySection::Pending => {
+                    sql_activity_current_line(&tab.pending_transaction_sql, pending_scroll)
+                }
                 SqlActivitySection::Committed => tab
                     .committed_sql_batches
                     .get(cursor)
@@ -11331,7 +11350,8 @@ impl App {
             },
             Some(WorkspaceTab::Relation(tab)) => match section {
                 SqlActivitySection::Pending => {
-                    tab.transaction_review_sql.clone().unwrap_or_default()
+                    let pending = crate::model::relation_review::activity_pending_sql(tab);
+                    sql_activity_current_line(&pending, pending_scroll)
                 }
                 SqlActivitySection::Committed => tab
                     .committed_sql_batches
@@ -11361,12 +11381,49 @@ impl App {
             return Vec::new();
         }
         let description = match section {
-            SqlActivitySection::Pending => "pending SQL",
+            SqlActivitySection::Pending => "pending SQL line",
             SqlActivitySection::Committed => "committed SQL batch",
         };
         vec![Command::WriteClipboard(ClipboardPayload {
             text,
             description: description.into(),
+            sensitive: false,
+        })]
+    }
+
+    fn sql_activity_yank_all(&mut self) -> Vec<Command> {
+        let Some(tab_id) = self.sql_activity_state().map(|state| state.tab_id) else {
+            return Vec::new();
+        };
+        if !self.sql_activity_tab_present(tab_id) {
+            self.overlay = None;
+            return Vec::new();
+        }
+        let mut parts = Vec::new();
+        let pending = self.sql_activity_pending_text_for_tab(tab_id);
+        if !pending.trim().is_empty() {
+            parts.push(pending);
+        }
+        let batches = match self.tabs.iter().find(|tab| tab.id() == tab_id) {
+            Some(WorkspaceTab::Sql(tab)) => tab.committed_sql_batches.iter(),
+            Some(WorkspaceTab::Relation(tab)) => tab.committed_sql_batches.iter(),
+            _ => {
+                self.notify_warning("Clipboard", "Nothing to copy");
+                return Vec::new();
+            }
+        };
+        for batch in batches {
+            if !batch.sql.trim().is_empty() {
+                parts.push(batch.sql.clone());
+            }
+        }
+        if parts.is_empty() {
+            self.notify_warning("Clipboard", "Nothing to copy");
+            return Vec::new();
+        }
+        vec![Command::WriteClipboard(ClipboardPayload {
+            text: parts.join("\n\n"),
+            description: "SQL activity".into(),
             sensitive: false,
         })]
     }
@@ -18319,6 +18376,16 @@ fn console_target_label(target: &ExecutionTarget) -> String {
     })
 }
 
+fn sql_activity_current_line(text: &str, scroll: u16) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    text.lines()
+        .nth(usize::from(scroll))
+        .unwrap_or_else(|| text.lines().next().unwrap_or(text))
+        .to_owned()
+}
+
 fn derived_sql_for_log(
     derived: &DerivedResultState,
     page: Option<&crate::model::pagination::ResultPagination>,
@@ -19558,7 +19625,17 @@ mod tests {
     fn open_sql_activity_on_console_with_pending() {
         let mut app = App::new(Vec::new());
         let tab_id = app.active_console().id;
-        app.active_console_mut().pending_transaction_sql = "UPDATE users SET name = 'ada';".into();
+        {
+            let tab = app.active_console_mut();
+            tab.pending_transaction_sql = "UPDATE users SET name = 'ada';".into();
+            tab.committed_sql_batches
+                .push_front(crate::model::sql_activity::CommittedSqlBatch {
+                    timestamp: chrono::Local::now(),
+                    sql: "INSERT INTO t VALUES (1);".into(),
+                    statement_count: 1,
+                    elapsed: None,
+                });
+        }
 
         assert!(app.update(Action::OpenSqlActivity).is_empty());
         match &app.overlay {
@@ -19567,7 +19644,7 @@ mod tests {
                 assert_eq!(state.section, SqlActivitySection::Pending);
                 assert_eq!(state.pending_scroll, 0);
                 assert_eq!(state.committed_cursor, 0);
-                assert!(state.expanded.is_empty());
+                assert!(state.expanded.contains(&0));
                 assert!(state.status_hint.is_none());
             }
             other => panic!("expected SqlActivity overlay, got {other:?}"),
@@ -19631,9 +19708,39 @@ mod tests {
     #[test]
     fn sql_activity_yank_pending_writes_clipboard_command() {
         let mut app = App::new(Vec::new());
-        let sql = "UPDATE users SET name = 'ada';";
+        let sql = "UPDATE users SET name = 'ada';\nDELETE FROM users WHERE id = 1;";
         let tab = app.active_console_mut();
         tab.pending_transaction_sql = sql.into();
+        let tab_id = tab.id;
+        app.overlay = Some(Overlay::SqlActivity(SqlActivityState {
+            tab_id,
+            section: SqlActivitySection::Pending,
+            pending_scroll: 1,
+            committed_cursor: 0,
+            expanded: Default::default(),
+            status_hint: None,
+        }));
+
+        match app.update(Action::SqlActivityYank).as_slice() {
+            [Command::WriteClipboard(payload)] => {
+                assert_eq!(payload.text, "DELETE FROM users WHERE id = 1;")
+            }
+            other => panic!("expected WriteClipboard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sql_activity_yank_all_joins_pending_and_committed() {
+        let mut app = App::new(Vec::new());
+        let tab = app.active_console_mut();
+        tab.pending_transaction_sql = "UPDATE users SET name = 'ada';".into();
+        tab.committed_sql_batches
+            .push_front(crate::model::sql_activity::CommittedSqlBatch {
+                timestamp: chrono::Local::now(),
+                sql: "INSERT INTO t VALUES (1);".into(),
+                statement_count: 1,
+                elapsed: None,
+            });
         let tab_id = tab.id;
         app.overlay = Some(Overlay::SqlActivity(SqlActivityState {
             tab_id,
@@ -19644,10 +19751,68 @@ mod tests {
             status_hint: None,
         }));
 
-        match app.update(Action::SqlActivityYank).as_slice() {
-            [Command::WriteClipboard(payload)] => assert_eq!(payload.text, sql),
+        match app.update(Action::SqlActivityYankAll).as_slice() {
+            [Command::WriteClipboard(payload)] => {
+                assert!(payload.text.contains("UPDATE users SET name = 'ada';"));
+                assert!(payload.text.contains("INSERT INTO t VALUES (1);"));
+            }
             other => panic!("expected WriteClipboard, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn sql_activity_relation_pending_shows_live_dirty_preview() {
+        let mut tab = RelationTab::new("public.users");
+        let mut edit = RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("ada".into()),
+        ]]);
+        assert!(edit.rows[0].update_cell(1, CellValue::Text("bob".into())));
+        tab.edit = Some(edit);
+        tab.data = RelationLoad::Ready(OwnedSnapshot {
+            value: crate::db::RelationPreview {
+                sql: "SELECT * FROM users".into(),
+                result: QueryOutcome::from_result_set(
+                    ResultSet {
+                        columns: vec![
+                            ColumnMeta {
+                                name: "id".into(),
+                                type_name: "integer".into(),
+                            },
+                            ColumnMeta {
+                                name: "name".into(),
+                                type_name: "text".into(),
+                            },
+                        ],
+                        rows: vec![vec![CellValue::Integer(1), CellValue::Text("ada".into())]],
+                        affected_rows: 0,
+                    },
+                    Duration::ZERO,
+                    Duration::ZERO,
+                ),
+                pagination: crate::model::pagination::ResultPagination::from_page(
+                    crate::model::pagination::PageRequest::first(
+                        crate::model::pagination::PageSize::default(),
+                    ),
+                    1,
+                ),
+                row_versions: None,
+            },
+            attribution: SnapshotAttribution {
+                connection: ConnectionIdentity {
+                    profile_id: Uuid::nil(),
+                    generation: 1,
+                },
+                profile_id: Uuid::nil(),
+                scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "", None),
+            },
+        });
+        let pending = crate::model::relation_review::activity_pending_sql(&tab);
+        assert!(
+            pending.contains("UPDATE") && pending.contains("bob"),
+            "pending={pending}"
+        );
+        assert!(tab.transaction_review_sql.is_none());
     }
 
     #[test]

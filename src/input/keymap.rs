@@ -25,6 +25,7 @@ enum Pending {
     Previous,
     Next,
     GridYank,
+    SqlActivityYank,
     RelationDelete,
     GridAlign,
     RecordViewGoto,
@@ -493,13 +494,33 @@ impl Keymap {
             };
         }
         if let Some(Overlay::SqlActivity(state)) = app.overlay.as_ref() {
-            self.pending = None;
+            let pending = self.pending.take();
+            if let Some(pending) = pending.as_ref()
+                && pending_is_valid(
+                    pending,
+                    app,
+                    Instant::now(),
+                    self.generation,
+                    self.sequence_timeout,
+                )
+                && matches!(pending.pending, Pending::SqlActivityYank)
+            {
+                return match event.code {
+                    KeyCode::Char('y') => Some(Action::SqlActivityYank),
+                    KeyCode::Char('a') => Some(Action::SqlActivityYankAll),
+                    KeyCode::Esc => None,
+                    _ => None,
+                };
+            }
             let section = state.section;
             return match event.code {
                 KeyCode::Esc | KeyCode::Char('q') => Some(Action::SqlActivityDismiss),
                 KeyCode::Tab => Some(Action::SqlActivityToggleSection),
                 KeyCode::Enter | KeyCode::Char(' ') => Some(Action::SqlActivityEnter),
-                KeyCode::Char('y') => Some(Action::SqlActivityYank),
+                KeyCode::Char('y') => {
+                    self.set_pending(Pending::SqlActivityYank, app);
+                    None
+                }
                 KeyCode::Up | KeyCode::Char('k') => match section {
                     crate::model::workspace::SqlActivitySection::Pending => {
                         Some(Action::SqlActivityPendingScroll(-1))
@@ -2235,6 +2256,7 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
         Pending::Previous => Some((ShortcutPrefix::Previous, "[".into())),
         Pending::Next => Some((ShortcutPrefix::Next, "]".into())),
         Pending::GridYank => Some((ShortcutPrefix::GridYank, "y".into())),
+        Pending::SqlActivityYank => Some((ShortcutPrefix::GridYank, "y".into())),
         Pending::RelationDelete => Some((ShortcutPrefix::RelationDelete, "d".into())),
         Pending::GridAlign => Some((ShortcutPrefix::GridAlign, "z".into())),
         Pending::RecordViewGoto => Some((ShortcutPrefix::RecordViewGoto, "g".into())),
@@ -4458,9 +4480,15 @@ mod tests {
             keymap.map(key(KeyCode::Enter), &app),
             Some(Action::SqlActivityEnter)
         );
+        assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
         assert_eq!(
             keymap.map(key(KeyCode::Char('y')), &app),
             Some(Action::SqlActivityYank)
+        );
+        assert_eq!(keymap.map(key(KeyCode::Char('y')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('a')), &app),
+            Some(Action::SqlActivityYankAll)
         );
         assert_eq!(
             keymap.map(key(KeyCode::Esc), &app),

@@ -555,6 +555,7 @@ pub enum Action {
     SqlActivityToggleExpand,
     SqlActivityEnter,
     SqlActivityYank,
+    SqlActivityYankAll,
     SqlActivityDismiss,
     OpenTransactionMenu,
     SelectTransactionMenu(usize),

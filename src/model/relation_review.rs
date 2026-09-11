@@ -1,5 +1,54 @@
 use crate::db::value::CellValue;
+use crate::model::relation::{RelationLoad, RelationTab};
 use crate::model::relation_edit::{EditableRowState, RelationEditSession};
+use crate::model::transaction::TransactionState;
+
+/// Pending SQL for SQL Activity: stored review SQL if present, otherwise a live
+/// preview of local dirty edits (before Ctrl-s / TRANSACTION REVIEW).
+pub fn activity_pending_sql(tab: &RelationTab) -> String {
+    if let Some(sql) = tab
+        .transaction_review_sql
+        .as_deref()
+        .filter(|sql| !sql.trim().is_empty())
+    {
+        return sql.to_owned();
+    }
+    let dirty = tab.edit.as_ref().is_some_and(|edit| {
+        edit.rows
+            .iter()
+            .any(|row| !matches!(row.state, EditableRowState::Clean))
+    });
+    if !dirty && tab.transaction_state == TransactionState::Idle {
+        return String::new();
+    }
+    let Some(edit) = tab.edit.as_ref() else {
+        return String::new();
+    };
+    let snapshot = match &tab.data {
+        RelationLoad::Ready(snapshot) => Some(snapshot),
+        RelationLoad::Loading { previous, .. }
+        | RelationLoad::Failed { previous, .. }
+        | RelationLoad::Cancelled { previous } => previous.as_ref(),
+        RelationLoad::Empty => None,
+    };
+    snapshot
+        .and_then(|snapshot| snapshot.value.result.result_sets.last())
+        .map(|result| {
+            let columns = result
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            let primary_key_columns = match &tab.ddl {
+                RelationLoad::Ready(ddl) => {
+                    crate::db::mutation::metadata_fingerprint(&ddl.value).primary_key
+                }
+                _ => Vec::new(),
+            };
+            preview_sql(edit, tab.title(), &columns, &primary_key_columns)
+        })
+        .unwrap_or_default()
+}
 
 /// Builds a safe, read-only review representation from the local edit session.
 /// Execution still goes through the typed mutation requests in `App::relation_save`.

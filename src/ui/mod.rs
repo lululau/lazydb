@@ -4545,23 +4545,24 @@ fn render_sql_activity_overlay(
 
     let popup = centered(
         area,
-        area.width.saturating_sub(4).min(110),
-        24.min(area.height),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
     );
     let inner = dialog::render_frame(frame, popup, " SQL ACTIVITY ", theme);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
     let inner = inner.inner(ratatui::layout::Margin::new(
-        u16::from(inner.width > 6) * 2,
-        u16::from(inner.height >= 14),
+        1,
+        u16::from(inner.height >= 8),
     ));
     if inner.width == 0 || inner.height == 0 {
         return;
     }
 
     let tab = app.tabs.iter().find(|tab| tab.id() == activity.tab_id);
-    let pending_text = tab.map(sql_activity_pending_text).unwrap_or("");
+    let pending_owned = tab.map(sql_activity_pending_text).unwrap_or_default();
+    let pending_text = pending_owned.as_str();
     let open_txn = tab.is_some_and(sql_activity_txn_open);
     let pending_placeholder = sql_activity_pending_placeholder(open_txn, pending_text);
     let pending_count = if open_txn {
@@ -4680,16 +4681,16 @@ fn render_sql_activity_overlay(
     dialog::render_hint(
         frame,
         sections[sections.len() - 1],
-        "Tab sections  j/k move  Enter review/expand  y yank  Esc",
+        "Tab sections  j/k move  Enter review/expand  yy yank  ya yank-all  Esc",
         theme,
     );
 }
 
-fn sql_activity_pending_text(tab: &WorkspaceTab) -> &str {
+fn sql_activity_pending_text(tab: &WorkspaceTab) -> String {
     match tab {
-        WorkspaceTab::Sql(tab) => tab.pending_transaction_sql.as_str(),
-        WorkspaceTab::Relation(tab) => tab.transaction_review_sql.as_deref().unwrap_or(""),
-        WorkspaceTab::Dashboard(_) => "",
+        WorkspaceTab::Sql(tab) => tab.pending_transaction_sql.clone(),
+        WorkspaceTab::Relation(tab) => crate::model::relation_review::activity_pending_sql(tab),
+        WorkspaceTab::Dashboard(_) => String::new(),
     }
 }
 
