@@ -10484,6 +10484,14 @@ impl App {
                 self.relation_edit_boolean(|input| input.temporal_shift_month(direction));
                 Vec::new()
             }
+            Action::RelationEditTemporalStep(direction) => {
+                self.relation_edit_boolean(|input| input.temporal_step_segment(direction));
+                Vec::new()
+            }
+            Action::RelationEditTemporalJump(field) => {
+                self.relation_edit_boolean(|input| input.temporal_jump_field(field));
+                Vec::new()
+            }
             Action::RelationEditInsert(character) => {
                 self.relation_edit_insert(character);
                 Vec::new()

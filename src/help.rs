@@ -1864,8 +1864,8 @@ static SHORTCUT_CATALOG: &[Shortcut] = &[
     row!(
         RelationEditTemporal,
         [RelationDataEdit],
-        "Left/Right  [/]  type",
-        "edit temporal fields; browse month",
+        "Left/Right  +/-  ymdHMS  [/]",
+        "edit temporal fields; step or jump units; browse month",
         RelationEditAvailable,
         display
     ),

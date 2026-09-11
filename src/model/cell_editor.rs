@@ -1,4 +1,6 @@
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::{
+    DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike,
+};
 use serde::de::IgnoredAny;
 
 use crate::{db::value::CellValue, model::text_input::TextInput, profile::DatabaseKind};
@@ -11,6 +13,16 @@ pub enum CellEditorKind {
     DateTime,
     Timestamp,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TemporalField {
+    Year,
+    Month,
+    Day,
+    Hour,
+    Minute,
+    Second,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,6 +618,126 @@ impl TemporalDraft {
         if let Some((start, _)) = self.segment_range(self.segment) {
             self.input.set_cursor(start);
         }
+    }
+
+    pub fn jump_to_field(&mut self, field: TemporalField) {
+        let Some(segment) = self.field_segment(field) else {
+            return;
+        };
+        self.segment = segment;
+        if let Some((start, _)) = self.segment_range(self.segment) {
+            self.input.set_cursor(start);
+        }
+    }
+
+    pub fn step_segment(&mut self, direction: isize) {
+        if direction == 0 {
+            return;
+        }
+        let segment = self.segment;
+        if !self.step_segment_parsed(direction) {
+            self.step_segment_digits(direction);
+        }
+        self.segment = segment.min(self.segment_count().saturating_sub(1));
+        if let Some((start, _)) = self.segment_range(self.segment) {
+            self.input.set_cursor(start);
+        }
+    }
+
+    fn field_segment(&self, field: TemporalField) -> Option<usize> {
+        match (self.kind, field) {
+            (
+                CellEditorKind::Date | CellEditorKind::DateTime | CellEditorKind::Timestamp,
+                TemporalField::Year,
+            ) => Some(0),
+            (
+                CellEditorKind::Date | CellEditorKind::DateTime | CellEditorKind::Timestamp,
+                TemporalField::Month,
+            ) => Some(1),
+            (
+                CellEditorKind::Date | CellEditorKind::DateTime | CellEditorKind::Timestamp,
+                TemporalField::Day,
+            ) => Some(2),
+            (CellEditorKind::Time, TemporalField::Hour) => Some(0),
+            (CellEditorKind::DateTime | CellEditorKind::Timestamp, TemporalField::Hour) => Some(3),
+            (CellEditorKind::Time, TemporalField::Minute) => Some(1),
+            (CellEditorKind::DateTime | CellEditorKind::Timestamp, TemporalField::Minute) => {
+                Some(4)
+            }
+            (CellEditorKind::Time, TemporalField::Second) => Some(2),
+            (CellEditorKind::DateTime | CellEditorKind::Timestamp, TemporalField::Second) => {
+                Some(5)
+            }
+            _ => None,
+        }
+    }
+
+    fn step_segment_parsed(&mut self, direction: isize) -> bool {
+        match self.kind {
+            CellEditorKind::Date => {
+                let Ok(date) = self.parse_date() else {
+                    return false;
+                };
+                let Some(next) = step_date_field(date, self.segment, direction) else {
+                    return false;
+                };
+                self.input.set(next.format("%Y-%m-%d").to_string());
+                true
+            }
+            CellEditorKind::Time => {
+                let Ok(time) = self.parse_time() else {
+                    return false;
+                };
+                let Some(next) = step_time_field(time, self.segment, direction) else {
+                    return false;
+                };
+                self.input.set(format_time(next));
+                true
+            }
+            CellEditorKind::DateTime => {
+                let Ok(value) = self.parse_datetime() else {
+                    return false;
+                };
+                let Some(next) = step_datetime_field(value, self.segment, direction) else {
+                    return false;
+                };
+                self.input.set(format_datetime(next));
+                true
+            }
+            CellEditorKind::Timestamp => {
+                let Ok(value) = self.parse_timestamp() else {
+                    return false;
+                };
+                let Some(next) = step_timestamp_field(value, self.segment, direction) else {
+                    return false;
+                };
+                self.input.set(format_timestamp(next));
+                self.fraction_width = next.nanosecond().to_string().len().max(1);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn step_segment_digits(&mut self, direction: isize) {
+        let Some((start, end)) = self.segment_range(self.segment) else {
+            return;
+        };
+        let text = self.input.value();
+        let Ok(current) = text[start..end].parse::<i64>() else {
+            return;
+        };
+        let width = end - start;
+        let next = (current + direction as i64).max(0);
+        let rendered = format!("{next:0>width$}");
+        let rendered = if rendered.len() > width {
+            rendered[rendered.len() - width..].to_owned()
+        } else {
+            rendered
+        };
+        let mut text = text.to_owned();
+        text.replace_range(start..end, &rendered);
+        self.input.set(text);
     }
 
     pub fn shift_month(&mut self, direction: isize) {
@@ -1255,6 +1387,41 @@ impl CellEditorBuffer {
         }
     }
 
+    pub(crate) fn temporal_step_segment(&mut self, direction: isize) {
+        let before = self.snapshot();
+        if let Self {
+            content:
+                CellEditorContent::Typed {
+                    draft: TypedDraft::Temporal(draft),
+                    ..
+                },
+            ..
+        } = self
+        {
+            let old = draft.render().to_owned();
+            let segment = draft.segment;
+            draft.step_segment(direction);
+            if draft.render() != old || draft.segment != segment {
+                self.presence = CellEditorPresence::Value;
+                self.record_presence_transition(before);
+            }
+        }
+    }
+
+    pub(crate) fn temporal_jump_field(&mut self, field: TemporalField) {
+        if let Self {
+            content:
+                CellEditorContent::Typed {
+                    draft: TypedDraft::Temporal(draft),
+                    ..
+                },
+            ..
+        } = self
+        {
+            draft.jump_to_field(field);
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn temporal_insert(&mut self, character: char) {
         let before = self.snapshot();
@@ -1345,6 +1512,75 @@ fn normalize_type_name(type_name: &str) -> String {
     type_name.trim().to_ascii_lowercase()
 }
 
+fn step_date_field(date: NaiveDate, segment: usize, direction: isize) -> Option<NaiveDate> {
+    match segment {
+        0 => date.with_year(date.year() + direction as i32),
+        1 => {
+            let month = date.month0() as isize + direction;
+            let year = date.year() + month.div_euclid(12) as i32;
+            let month = month.rem_euclid(12) as u32 + 1;
+            let day = date.day().min(days_in_month(year, month));
+            NaiveDate::from_ymd_opt(year, month, day)
+        }
+        2 => date.checked_add_signed(chrono::Duration::days(direction as i64)),
+        _ => None,
+    }
+}
+
+fn step_time_field(time: NaiveTime, segment: usize, direction: isize) -> Option<NaiveTime> {
+    match segment {
+        0 => {
+            let hour = (time.hour() as isize + direction).rem_euclid(24) as u32;
+            time.with_hour(hour)
+        }
+        1 => {
+            let minute = (time.minute() as isize + direction).rem_euclid(60) as u32;
+            time.with_minute(minute)
+        }
+        2 => {
+            let second = (time.second() as isize + direction).rem_euclid(60) as u32;
+            time.with_second(second)
+        }
+        _ => None,
+    }
+}
+
+fn step_datetime_field(
+    value: NaiveDateTime,
+    segment: usize,
+    direction: isize,
+) -> Option<NaiveDateTime> {
+    match segment {
+        0..=2 => {
+            let date = step_date_field(value.date(), segment, direction)?;
+            Some(NaiveDateTime::new(date, value.time()))
+        }
+        3..=5 => {
+            let time = step_time_field(value.time(), segment - 3, direction)?;
+            Some(NaiveDateTime::new(value.date(), time))
+        }
+        _ => None,
+    }
+}
+
+fn step_timestamp_field(
+    value: DateTime<FixedOffset>,
+    segment: usize,
+    direction: isize,
+) -> Option<DateTime<FixedOffset>> {
+    match segment {
+        0..=5 => {
+            let naive = step_datetime_field(value.naive_local(), segment, direction)?;
+            value
+                .timezone()
+                .from_local_datetime(&naive)
+                .single()
+                .or_else(|| value.timezone().from_local_datetime(&naive).earliest())
+        }
+        _ => None,
+    }
+}
+
 fn format_time(value: NaiveTime) -> String {
     let base = value.format("%H:%M:%S").to_string();
     format_fraction(base, value.nanosecond())
@@ -1388,7 +1624,7 @@ mod tests {
     use crate::db::value::CellValue;
     use crate::model::text_input::TextInput;
     use crate::profile::DatabaseKind;
-    use chrono::{DateTime, NaiveDate, NaiveTime};
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
 
     use super::{
         CellEditorBuffer, CellEditorContent, CellEditorKind, CellEditorPresence, JsonBuffer,
@@ -1479,6 +1715,51 @@ mod tests {
         draft.set_segment(1, "13");
         assert!(draft.parse_date().is_err());
         assert!(draft.error().is_some());
+    }
+
+    #[test]
+    fn temporal_draft_steps_current_segment_with_plus_minus_semantics() {
+        let mut draft = TemporalDraft::from_datetime(
+            NaiveDateTime::parse_from_str("2023-01-15 11:14:25", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        draft.jump_to_field(super::TemporalField::Second);
+        draft.step_segment(1);
+        assert_eq!(draft.render(), "2023-01-15 11:14:26");
+        draft.step_segment(-1);
+        assert_eq!(draft.render(), "2023-01-15 11:14:25");
+
+        draft.jump_to_field(super::TemporalField::Hour);
+        draft.step_segment(-1);
+        assert_eq!(draft.render(), "2023-01-15 10:14:25");
+
+        draft.jump_to_field(super::TemporalField::Month);
+        draft.step_segment(1);
+        assert_eq!(draft.render(), "2023-02-15 10:14:25");
+    }
+
+    #[test]
+    fn temporal_draft_jumps_to_ymd_hms_fields() {
+        let mut draft = TemporalDraft::from_datetime(
+            NaiveDateTime::parse_from_str("2023-01-15 11:14:25", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        draft.jump_to_field(super::TemporalField::Second);
+        assert_eq!(draft.input().cursor(), 17);
+        draft.jump_to_field(super::TemporalField::Year);
+        assert_eq!(draft.input().cursor(), 0);
+        draft.jump_to_field(super::TemporalField::Hour);
+        assert_eq!(draft.input().cursor(), 11);
+
+        let mut time =
+            TemporalDraft::from_time(NaiveTime::parse_from_str("11:14:25", "%H:%M:%S").unwrap());
+        let before = time.input().cursor();
+        time.jump_to_field(super::TemporalField::Year);
+        assert_eq!(
+            time.input().cursor(),
+            before,
+            "year jump is a no-op on time-only drafts"
+        );
+        time.jump_to_field(super::TemporalField::Minute);
+        assert_eq!(time.input().cursor(), 3);
     }
 
     #[test]

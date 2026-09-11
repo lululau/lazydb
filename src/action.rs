@@ -684,6 +684,8 @@ pub enum Action {
     RelationEditUseValue,
     RelationEditTemporalMove(isize),
     RelationEditTemporalMonth(isize),
+    RelationEditTemporalStep(isize),
+    RelationEditTemporalJump(crate::model::cell_editor::TemporalField),
     RelationEditInsert(char),
     RelationEditJsonFormat,
     RelationEditJsonMove(isize),

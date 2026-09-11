@@ -2682,6 +2682,7 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
             }, .. }
         ));
         if temporal {
+            use crate::model::cell_editor::TemporalField;
             return match (event.modifiers, event.code) {
                 (KeyModifiers::NONE, KeyCode::Left) => Some(Action::RelationEditTemporalMove(-1)),
                 (KeyModifiers::NONE, KeyCode::Right) => Some(Action::RelationEditTemporalMove(1)),
@@ -2690,6 +2691,30 @@ fn map_relation_data(event: KeyEvent, app: &App) -> Option<Action> {
                 }
                 (KeyModifiers::NONE, KeyCode::Char(']')) => {
                     Some(Action::RelationEditTemporalMonth(1))
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('+')) => {
+                    Some(Action::RelationEditTemporalStep(1))
+                }
+                (KeyModifiers::NONE, KeyCode::Char('-')) => {
+                    Some(Action::RelationEditTemporalStep(-1))
+                }
+                (KeyModifiers::NONE, KeyCode::Char('y')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Year))
+                }
+                (KeyModifiers::NONE, KeyCode::Char('m')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Month))
+                }
+                (KeyModifiers::NONE, KeyCode::Char('d')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Day))
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('H')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Hour))
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('M')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Minute))
+                }
+                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char('S')) => {
+                    Some(Action::RelationEditTemporalJump(TemporalField::Second))
                 }
                 (KeyModifiers::NONE, KeyCode::Enter) => Some(Action::RelationEditConfirm),
                 (KeyModifiers::NONE, KeyCode::Esc) => Some(Action::RelationEditCancel),
@@ -4059,6 +4084,56 @@ mod tests {
             Some(Action::RelationEditConfirm)
         );
         assert!(keymap.pending.is_none());
+    }
+
+    #[test]
+    fn temporal_cell_editor_maps_step_and_jump_shortcuts() {
+        use crate::model::cell_editor::{
+            CellEditorBuffer, CellEditorContent, CellEditorKind, CellEditorPresence, TemporalDraft,
+            TemporalField, TypedDraft,
+        };
+        use chrono::NaiveDateTime;
+
+        let draft = TemporalDraft::from_datetime(
+            NaiveDateTime::parse_from_str("2023-01-15 11:14:25", "%Y-%m-%d %H:%M:%S").unwrap(),
+        );
+        let app = relation_app(RelationGridMode::EditCell(Box::new(
+            crate::model::relation_edit::CellEditorState {
+                row: 0,
+                column: 0,
+                input: CellEditorBuffer {
+                    presence: CellEditorPresence::Value,
+                    content: CellEditorContent::Typed {
+                        kind: CellEditorKind::DateTime,
+                        draft: TypedDraft::Temporal(draft),
+                    },
+                    ..CellEditorBuffer::default()
+                },
+                error: None,
+            },
+        )));
+        let mut keymap = Keymap::default();
+
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('+')), &app),
+            Some(Action::RelationEditTemporalStep(1))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('-')), &app),
+            Some(Action::RelationEditTemporalStep(-1))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('S')), &app),
+            Some(Action::RelationEditTemporalJump(TemporalField::Second))
+        );
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('y')), &app),
+            Some(Action::RelationEditTemporalJump(TemporalField::Year))
+        );
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::SHIFT), &app,),
+            Some(Action::RelationEditTemporalJump(TemporalField::Minute))
+        );
     }
 
     #[test]
