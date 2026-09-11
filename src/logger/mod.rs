@@ -28,10 +28,10 @@ pub struct SqlLogger {
 }
 
 pub fn resolve_log_dir_with(env_var: Option<&OsStr>) -> PathBuf {
-    if let Some(val) = env_var {
-        if !val.is_empty() {
-            return PathBuf::from(val);
-        }
+    if let Some(val) = env_var
+        && !val.is_empty()
+    {
+        return PathBuf::from(val);
     }
     if let Some(home) = std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
@@ -146,8 +146,7 @@ impl SqlLogger {
     }
 
     pub fn init(base_log_dir: Option<PathBuf>) -> Result<(Self, PathBuf), std::io::Error> {
-        let handle = tokio::runtime::Handle::try_current()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let handle = tokio::runtime::Handle::try_current().map_err(std::io::Error::other)?;
 
         let base_dir = base_log_dir.unwrap_or_else(resolve_log_dir);
         let sql_dir = base_dir.join("sql");

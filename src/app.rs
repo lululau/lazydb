@@ -279,6 +279,7 @@ pub struct App {
     pending_identity_refreshes: HashMap<u64, IdentityRefresh>,
     pending_parent_recoveries: HashMap<CatalogTarget, crate::db::catalog::CatalogId>,
     catalog_sync_pending: bool,
+    pub sql_logger: crate::logger::SqlLogger,
 }
 
 #[derive(Clone, Debug)]
@@ -655,7 +656,21 @@ impl App {
             (Vec::new(), Vec::new())
         };
 
-        Self {
+        let (sql_logger, log_warning) = match crate::logger::SqlLogger::init(None) {
+            Ok((logger, _path)) => (logger, None),
+            Err(error) => {
+                let warning = if tokio::runtime::Handle::try_current().is_ok() {
+                    Some(format!(
+                        "Failed to initialize SQL execution logger: {error}"
+                    ))
+                } else {
+                    None
+                };
+                (crate::logger::SqlLogger::noop(), warning)
+            }
+        };
+
+        let mut app = Self {
             project,
             profiles,
             connection_groups: Vec::new(),
@@ -706,7 +721,19 @@ impl App {
             pending_identity_refreshes: HashMap::new(),
             pending_parent_recoveries: HashMap::new(),
             catalog_sync_pending: false,
+            sql_logger,
+        };
+
+        if let Some(msg) = log_warning {
+            app.notify_warning("SQL Logger", msg);
         }
+
+        app
+    }
+
+    pub fn with_sql_logger(mut self, logger: crate::logger::SqlLogger) -> Self {
+        self.sql_logger = logger;
+        self
     }
 
     pub(crate) fn set_key_bindings(&mut self, bindings: crate::config::KeyBindings) {
@@ -6469,7 +6496,16 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogMutationSucceeded { plan, .. } => {
+            Action::CatalogMutationSucceeded { plan, outcome } => {
+                let record = crate::logger::SqlLogRecord {
+                    timestamp: chrono::Local::now(),
+                    connection: self.connection_name_for(&plan.request.connection),
+                    target: catalog_mutation_target_label(&plan),
+                    elapsed: outcome.stats.total(),
+                    outcome: crate::logger::SqlLogOutcome::MutationSuccess { affected_rows: 0 },
+                    sql: plan.statements().join(";\n"),
+                };
+                self.sql_logger.log(record);
                 let valid = self.catalog_editor.as_ref().is_some_and(|editor| {
                     editor.plan.as_ref() == Some(&plan)
                         && editor.operation
@@ -6524,6 +6560,17 @@ impl App {
                 self.commands_for_catalog_targets(profile_id, &plan.refresh)
             }
             Action::CatalogMutationFailed { plan, message } => {
+                let record = crate::logger::SqlLogRecord {
+                    timestamp: chrono::Local::now(),
+                    connection: self.connection_name_for(&plan.request.connection),
+                    target: catalog_mutation_target_label(&plan),
+                    elapsed: std::time::Duration::ZERO,
+                    outcome: crate::logger::SqlLogOutcome::Failure {
+                        message: message.clone(),
+                    },
+                    sql: plan.statements().join(";\n"),
+                };
+                self.sql_logger.log(record);
                 let identity_matches =
                     self.connection.active_identity() == Some(plan.request.connection);
                 let epoch_matches = self
@@ -6786,7 +6833,16 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::CatalogDropSucceeded { plan, .. } => {
+            Action::CatalogDropSucceeded { plan, outcome } => {
+                let record = crate::logger::SqlLogRecord {
+                    timestamp: chrono::Local::now(),
+                    connection: self.connection_name_for(&plan.request.connection),
+                    target: catalog_drop_target_label(&plan),
+                    elapsed: outcome.stats.total(),
+                    outcome: crate::logger::SqlLogOutcome::MutationSuccess { affected_rows: 0 },
+                    sql: plan.sql().to_string(),
+                };
+                self.sql_logger.log(record);
                 let Some(Overlay::CatalogDropConfirm { plan: expected, .. }) =
                     self.overlay.as_ref()
                 else {
@@ -6827,6 +6883,17 @@ impl App {
                 Vec::new()
             }
             Action::CatalogDropFailed { plan, message } => {
+                let record = crate::logger::SqlLogRecord {
+                    timestamp: chrono::Local::now(),
+                    connection: self.connection_name_for(&plan.request.connection),
+                    target: catalog_drop_target_label(&plan),
+                    elapsed: std::time::Duration::ZERO,
+                    outcome: crate::logger::SqlLogOutcome::Failure {
+                        message: message.clone(),
+                    },
+                    sql: plan.sql().to_string(),
+                };
+                self.sql_logger.log(record);
                 self.overlay = Some(Overlay::CatalogDropConfirm {
                     maintenance_database: match plan.execution_target {
                         crate::db::catalog_drop::CatalogDropExecutionTarget::MaintenanceDatabase(
@@ -9206,13 +9273,33 @@ impl App {
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Failed;
-                append_failed_execution_output(&mut self.editor, tab, generation, message);
-                if let Some(last) = tab.last_execution.as_mut()
+                append_failed_execution_output(&mut self.editor, tab, generation, message.clone());
+                let log_data = if let Some(last) = tab.last_execution.as_mut()
                     && last.draft.query_generation + 1 == generation
                 {
                     last.result = ExecutionResult::Failed;
-                }
+                    Some((
+                        last.draft.sql.clone(),
+                        console_target_label(&last.draft.target),
+                        last.draft.connection,
+                    ))
+                } else {
+                    None
+                };
                 tab.query.capability = unavailable_sql_filter_after_unsuccessful_execution();
+                if let Some((sql, target, connection_id)) = log_data {
+                    let connection_name = self.connection_name_for(&connection_id);
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target,
+                        elapsed: std::time::Duration::ZERO,
+                        outcome: crate::logger::SqlLogOutcome::Failure {
+                            message: message.clone(),
+                        },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::QueryPageFinished {
@@ -9616,8 +9703,20 @@ impl App {
                         &mut self.editor,
                         tab,
                         query_generation,
-                        message,
+                        message.clone(),
                     );
+                    let log_data = if let Some(last) = tab.last_execution.as_mut()
+                        && last.draft.query_generation + 1 == query_generation
+                    {
+                        last.result = ExecutionResult::Failed;
+                        Some((
+                            last.draft.sql.clone(),
+                            console_target_label(&last.draft.target),
+                            last.draft.connection,
+                        ))
+                    } else {
+                        None
+                    };
                     if postgres
                         && let Ok(next) = transaction::transition(
                             tab_snapshot(tab),
@@ -9625,6 +9724,19 @@ impl App {
                         )
                     {
                         apply_transaction_snapshot(tab, next);
+                    }
+                    if let Some((sql, target, connection_id)) = log_data {
+                        let connection_name = self.connection_name_for(&connection_id);
+                        self.sql_logger.log(crate::logger::SqlLogRecord {
+                            timestamp: chrono::Local::now(),
+                            connection: connection_name,
+                            target,
+                            elapsed: std::time::Duration::ZERO,
+                            outcome: crate::logger::SqlLogOutcome::Failure {
+                                message: message.clone(),
+                            },
+                            sql,
+                        });
                     }
                 } else if self.connection.active_identity() == Some(connection)
                     && let Some(tab) = self
@@ -17332,6 +17444,7 @@ impl App {
         };
         let rows = outcome.stats.row_count;
         let total_ms = outcome.stats.total().as_millis();
+        let elapsed = outcome.stats.total();
         let (is_query, execution_log) = tab
             .last_execution
             .as_ref()
@@ -17345,6 +17458,29 @@ impl App {
                 )
             })
             .unwrap_or((true, None));
+        let log_data = tab
+            .last_execution
+            .as_ref()
+            .filter(|last| last.draft.query_generation + 1 == generation)
+            .map(|last| {
+                (
+                    last.draft.sql.clone(),
+                    console_target_label(&last.draft.target),
+                    last.draft.connection,
+                )
+            });
+        let log_outcome = if is_query {
+            crate::logger::SqlLogOutcome::QuerySuccess {
+                rows: outcome.stats.row_count,
+            }
+        } else {
+            let affected_rows = outcome
+                .result_sets
+                .iter()
+                .map(|r| r.affected_rows)
+                .sum::<u64>();
+            crate::logger::SqlLogOutcome::MutationSuccess { affected_rows }
+        };
         if let Some(last) = tab.last_execution.as_mut()
             && last.draft.query_generation + 1 == generation
         {
@@ -17384,6 +17520,26 @@ impl App {
             }
             _ => unavailable_sql_filter_after_unsuccessful_execution(),
         };
+
+        if let Some((sql, target, connection_id)) = log_data {
+            let connection = self.connection_name_for(&connection_id);
+            self.sql_logger.log(crate::logger::SqlLogRecord {
+                timestamp: chrono::Local::now(),
+                connection,
+                target,
+                elapsed,
+                outcome: log_outcome,
+                sql,
+            });
+        }
+    }
+
+    pub fn connection_name_for(&self, connection: &crate::identity::ConnectionIdentity) -> String {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == connection.profile_id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| connection.profile_id.to_string())
     }
 
     fn pending_connection_matches(&self, profile_id: Uuid, generation: u64) -> bool {
@@ -17600,6 +17756,34 @@ fn console_target_label(target: &ExecutionTarget) -> String {
         Some(schema) => format!("{}.{}", target.database, schema),
         None => target.database.clone(),
     })
+}
+
+fn catalog_drop_target_label(plan: &crate::db::catalog_drop::CatalogDropPlan) -> String {
+    crate::security::sanitize_terminal_text(&match &plan.execution_target {
+        crate::db::catalog_drop::CatalogDropExecutionTarget::MaintenanceDatabase(database) => {
+            database.clone()
+        }
+        crate::db::catalog_drop::CatalogDropExecutionTarget::CurrentConnection => {
+            match plan.object.native_path.as_slice() {
+                [database, schema, ..] => format!("{database}.{schema}"),
+                [database] => database.clone(),
+                [] => String::new(),
+            }
+        }
+    })
+}
+
+fn catalog_mutation_target_label(
+    plan: &crate::db::catalog_mutation::CatalogMutationPlan,
+) -> String {
+    match &plan.execution_target {
+        crate::db::catalog_mutation::CatalogMutationTarget::Database(target) => {
+            console_target_label(target)
+        }
+        crate::db::catalog_mutation::CatalogMutationTarget::Maintenance { database } => {
+            crate::security::sanitize_terminal_text(database)
+        }
+    }
 }
 
 fn target_switch_statement(target: &ExecutionTarget) -> String {
@@ -21808,5 +21992,262 @@ mod tests {
             app.active_console().transaction_state,
             crate::model::transaction::TransactionState::Active
         );
+    }
+
+    #[tokio::test]
+    async fn finish_query_records_success_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT id, name FROM users");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![
+                        ColumnMeta {
+                            name: "id".into(),
+                            type_name: "bigint".into(),
+                        },
+                        ColumnMeta {
+                            name: "name".into(),
+                            type_name: "text".into(),
+                        },
+                    ],
+                    rows: vec![vec![CellValue::Integer(1), CellValue::Text("one".into())]],
+                    affected_rows: 0,
+                }],
+                stats: QueryStats::new(Duration::from_millis(10), Duration::from_millis(5), 1),
+            },
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[OK 15ms 1 rows]"));
+        assert!(content.contains("SELECT id, name FROM users"));
+    }
+
+    #[tokio::test]
+    async fn finish_mutation_query_records_affected_rows_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("UPDATE users SET name = 'test'");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+
+        app.update(Action::QueryFinished {
+            tab_id,
+            generation,
+            connection,
+            outcome: QueryOutcome {
+                result_sets: vec![ResultSet {
+                    columns: vec![],
+                    rows: vec![],
+                    affected_rows: 3,
+                }],
+                stats: QueryStats::new(Duration::from_millis(12), Duration::from_millis(1), 0),
+            },
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[OK 13ms 3 row(s) affected]"));
+        assert!(content.contains("UPDATE users SET name = 'test'"));
+    }
+
+    #[tokio::test]
+    async fn query_failed_records_failure_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM non_existent");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+
+        app.update(Action::QueryFailed {
+            tab_id,
+            generation,
+            connection,
+            message: "relation \"non_existent\" does not exist".into(),
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: relation \"non_existent\" does not exist]"));
+        assert!(content.contains("SELECT * FROM non_existent"));
+    }
+
+    #[tokio::test]
+    async fn manual_query_failed_records_failure_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT 1");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        let transaction_generation = tab.transaction_generation;
+
+        app.update(Action::ManualQueryFailed {
+            tab_id,
+            query_generation: generation,
+            transaction_generation,
+            connection,
+            message: "syntax error at or near \"broken\"".into(),
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: syntax error at or near \"broken\"]"));
+        assert!(content.contains("SELECT 1"));
+    }
+
+    #[tokio::test]
+    async fn catalog_drop_and_mutation_record_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+
+        let connection = app.connection.active_identity().unwrap();
+        let schema_id = crate::db::catalog::CatalogId::new(
+            profile_id,
+            crate::db::catalog::CatalogKind::Schema,
+            ["kms", "public"],
+        );
+        let table_id = crate::db::catalog::CatalogId::new(
+            profile_id,
+            crate::db::catalog::CatalogKind::Table,
+            ["kms", "public", "users"],
+        );
+        let drop_request =
+            crate::db::catalog_drop::CatalogDropRequest::new(connection, table_id.clone(), 1);
+        let drop_entry = crate::db::catalog::CatalogEntry::relation(
+            table_id,
+            schema_id.clone(),
+            crate::db::catalog::QualifiedName {
+                database: Some("kms".into()),
+                schema: Some("public".into()),
+                object: "users".into(),
+            },
+            "table",
+            crate::db::catalog::OptionalMetadata::Unsupported,
+            false,
+        )
+        .unwrap();
+        let drop_plan = crate::db::catalog_drop::CatalogDropPlan::new(
+            drop_request,
+            &drop_entry,
+            "DROP TABLE \"public\".\"users\"",
+        )
+        .unwrap();
+
+        app.overlay = Some(Overlay::CatalogDropConfirm {
+            maintenance_database: None,
+            plan: Box::new(drop_plan.clone()),
+            delete_selected: false,
+            busy: true,
+            error: None,
+        });
+
+        app.update(Action::CatalogDropSucceeded {
+            plan: drop_plan.clone(),
+            outcome: QueryOutcome {
+                result_sets: vec![],
+                stats: QueryStats::new(Duration::from_millis(25), Duration::ZERO, 0),
+            },
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[kms/kms.public]"));
+        assert!(content.contains("[OK 25ms 0 row(s) affected]"));
+        assert!(content.contains("DROP TABLE \"public\".\"users\""));
+
+        app.update(Action::CatalogDropFailed {
+            plan: drop_plan.clone(),
+            message: "table is referenced by foreign key".into(),
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[ERROR 0ms: table is referenced by foreign key]"));
+
+        let mutation_request = crate::db::catalog_mutation::CatalogMutationRequest {
+            connection,
+            request_id: 2,
+            catalog_epoch: 0,
+            object_type: crate::db::catalog_mutation::CatalogObjectType::Catalog(
+                crate::db::catalog::CatalogKind::Table,
+            ),
+            mode: crate::db::catalog_mutation::CatalogMutationMode::Create,
+            anchor: crate::db::catalog_mutation::CatalogMutationAnchor::Catalog(schema_id.clone()),
+            current_database: Some("kms".into()),
+        };
+        let mutation_plan = crate::db::catalog_mutation::CatalogMutationPlan::new(
+            mutation_request,
+            crate::db::catalog_mutation::CatalogObjectType::Catalog(
+                crate::db::catalog::CatalogKind::Table,
+            ),
+            crate::db::catalog_mutation::CatalogMutationExecutionMode::Transactional,
+            crate::db::catalog_mutation::CatalogMutationTarget::Database(ExecutionTarget {
+                profile_id,
+                database: "kms".into(),
+                schema: Some("public".into()),
+            }),
+            vec![CatalogTarget::Databases],
+            crate::db::catalog_mutation::CatalogSelectionHint::Parent(CatalogTarget::Databases),
+            None,
+            vec![],
+            vec!["CREATE TABLE \"public\".\"posts\" (id INT)".into()],
+        )
+        .unwrap();
+
+        app.update(Action::CatalogMutationSucceeded {
+            plan: mutation_plan.clone(),
+            outcome: QueryOutcome {
+                result_sets: vec![],
+                stats: QueryStats::new(Duration::from_millis(30), Duration::ZERO, 0),
+            },
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[OK 30ms 0 row(s) affected]"));
+        assert!(content.contains("CREATE TABLE \"public\".\"posts\" (id INT)"));
+
+        app.update(Action::CatalogMutationFailed {
+            plan: mutation_plan,
+            message: "table already exists".into(),
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[ERROR 0ms: table already exists]"));
     }
 }
