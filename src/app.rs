@@ -16787,6 +16787,19 @@ impl App {
                         edit.commit_changes();
                         committed = true;
                     }
+                    if let Some(sql) = review_sql.as_ref().filter(|s| !s.trim().is_empty()) {
+                        let statement_count =
+                            crate::model::sql_activity::statement_count_in_pending(sql);
+                        crate::model::sql_activity::push_committed_batch(
+                            &mut tab.committed_sql_batches,
+                            crate::model::sql_activity::CommittedSqlBatch {
+                                timestamp: chrono::Local::now(),
+                                sql: sql.clone(),
+                                statement_count,
+                                elapsed: None,
+                            },
+                        );
+                    }
                     let sql = match review_sql.filter(|sql| !sql.is_empty()) {
                         Some(review) => format!("COMMIT;\n\n{review}"),
                         None => "COMMIT;".to_owned(),
@@ -18833,6 +18846,67 @@ mod tests {
             let revision = quit_revision(&mut app);
             finish_workspace_quit(&mut app, revision);
         }
+    }
+
+    #[test]
+    fn relation_commit_archives_review_sql_batch() {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_generation = 3;
+        tab.transaction_state = TransactionState::Committing;
+        tab.transaction_review_sql = Some("UPDATE t SET a=1 WHERE id=1;".into());
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+
+        app.relation_transaction_finished(
+            tab_id,
+            3,
+            ConnectionIdentity {
+                profile_id: Uuid::nil(),
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap() else {
+            panic!();
+        };
+        assert_eq!(tab.committed_sql_batches.len(), 1);
+        assert!(tab.committed_sql_batches[0].sql.contains("UPDATE t SET a=1"));
+        assert!(tab.transaction_review_sql.is_none());
+    }
+
+    #[test]
+    fn relation_rollback_clears_review_sql_without_archiving() {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_generation = 3;
+        tab.transaction_state = TransactionState::RollingBack;
+        tab.transaction_review_sql = Some("UPDATE t SET a=1 WHERE id=1;".into());
+        let snapshot = RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]);
+        tab.transaction_snapshot = Some(snapshot.clone());
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![CellValue::Integer(2)]]));
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+
+        app.relation_transaction_finished(
+            tab_id,
+            3,
+            ConnectionIdentity {
+                profile_id: Uuid::nil(),
+                generation: 1,
+            },
+            true,
+            None,
+        );
+
+        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap() else {
+            panic!();
+        };
+        assert!(tab.committed_sql_batches.is_empty());
+        assert!(tab.transaction_review_sql.is_none());
     }
 
     #[test]
