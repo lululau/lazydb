@@ -147,7 +147,10 @@ mod tests {
         assert!(mysql8013.supports_catalog());
 
         let commercial = MySqlServerInfo::parse("8.4.1-commercial").unwrap();
-        assert_eq!((commercial.major, commercial.minor, commercial.patch), (8, 4, 1));
+        assert_eq!(
+            (commercial.major, commercial.minor, commercial.patch),
+            (8, 4, 1)
+        );
 
         let maria = MySqlServerInfo::parse("10.1.48-MariaDB").unwrap();
         assert_eq!(maria.family, MySqlFamily::MariaDb);
@@ -155,20 +158,28 @@ mod tests {
 
         let prefixed = MySqlServerInfo::parse("5.5.5-10.11.8-MariaDB").unwrap();
         assert_eq!(prefixed.family, MySqlFamily::MariaDb);
-        assert_eq!((prefixed.major, prefixed.minor, prefixed.patch), (10, 11, 8));
+        assert_eq!(
+            (prefixed.major, prefixed.minor, prefixed.patch),
+            (10, 11, 8)
+        );
         assert!(prefixed.supports_catalog());
     }
 
     #[test]
     fn rejects_below_floor_and_garbage() {
         assert!(!MySqlServerInfo::parse("5.5.62").unwrap().supports_catalog());
-        assert!(!MySqlServerInfo::parse("10.0.38-MariaDB").unwrap().supports_catalog());
+        assert!(
+            !MySqlServerInfo::parse("10.0.38-MariaDB")
+                .unwrap()
+                .supports_catalog()
+        );
         assert!(MySqlServerInfo::parse("not-a-version").is_none());
     }
 
     #[test]
     fn capabilities_match_contract_matrix() {
-        let c56 = MySqlCatalogCapabilities::for_server(&MySqlServerInfo::parse("5.6.16-log").unwrap());
+        let c56 =
+            MySqlCatalogCapabilities::for_server(&MySqlServerInfo::parse("5.6.16-log").unwrap());
         assert!(!c56.statistics_expression);
         assert!(!c56.generation_expression);
         assert!(!c56.regexp_replace);
@@ -180,7 +191,8 @@ mod tests {
         assert!(c57.generation_expression);
         assert!(!c57.search_cte);
 
-        let c8013 = MySqlCatalogCapabilities::for_server(&MySqlServerInfo::parse("8.0.13").unwrap());
+        let c8013 =
+            MySqlCatalogCapabilities::for_server(&MySqlServerInfo::parse("8.0.13").unwrap());
         assert!(c8013.statistics_expression);
         assert!(c8013.generation_expression);
         assert!(c8013.regexp_replace);

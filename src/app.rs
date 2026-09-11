@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -9370,7 +9370,30 @@ impl App {
                     return Vec::new();
                 }
                 tab.query_status = QueryStatus::Failed;
-                append_failed_execution_output(&mut self.editor, tab, generation, message);
+                append_failed_execution_output(&mut self.editor, tab, generation, message.clone());
+                let log_data = if let Some(last) = tab.last_execution.as_mut()
+                    && last.draft.query_generation + 1 == generation
+                {
+                    last.result = ExecutionResult::Failed;
+                    Some((
+                        console_target_label(&last.draft.target),
+                        last.draft.connection,
+                        last.draft.sql.clone(),
+                    ))
+                } else {
+                    None
+                };
+                if let Some((target, connection_id, sql)) = log_data {
+                    let connection = self.connection_name_for(&connection_id);
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection,
+                        target,
+                        elapsed: Duration::ZERO,
+                        outcome: crate::logger::SqlLogOutcome::Failure { message },
+                        sql,
+                    });
+                }
                 Vec::new()
             }
             Action::DerivedQueryFinished {
@@ -9874,6 +9897,7 @@ impl App {
                     TransactionState::Committing,
                 ) {
                     let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    let connection_name = self.connection_name_for(&connection);
                     let tab = self
                         .tabs
                         .iter_mut()
@@ -9883,6 +9907,11 @@ impl App {
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::Committed)
                     {
+                        let target = tab
+                            .execution_target
+                            .as_ref()
+                            .map(console_target_label)
+                            .unwrap_or_default();
                         let impact = std::mem::replace(
                             &mut tab.pending_catalog_change_impact,
                             sql::CatalogChangeImpact::None,
@@ -9894,6 +9923,16 @@ impl App {
                             "transaction committed",
                             elapsed,
                         );
+                        self.sql_logger.log(crate::logger::SqlLogRecord {
+                            timestamp: chrono::Local::now(),
+                            connection: connection_name,
+                            target,
+                            elapsed: elapsed.unwrap_or(Duration::ZERO),
+                            outcome: crate::logger::SqlLogOutcome::MutationSuccess {
+                                affected_rows: 0,
+                            },
+                            sql: "commit;".to_owned(),
+                        });
                         let mut commands = self.reconcile_catalog_change(tab_id, impact);
                         commands.extend(self.finish_deferred(tab_id));
                         return commands;
@@ -9917,7 +9956,8 @@ impl App {
                     connection,
                     TransactionState::Committing,
                 ) {
-                    self.clear_transaction_op_timing(tab_id);
+                    let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    let connection_name = self.connection_name_for(&connection);
                     let mut reconcile = None;
                     let tab = self
                         .tabs
@@ -9925,6 +9965,11 @@ impl App {
                         .find(|tab| tab.id() == tab_id)
                         .and_then(WorkspaceTab::as_console_mut)
                         .unwrap();
+                    let target = tab
+                        .execution_target
+                        .as_ref()
+                        .map(console_target_label)
+                        .unwrap_or_default();
                     let event = if unknown {
                         TransactionEvent::OutcomeUnknown
                     } else {
@@ -9945,8 +9990,16 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry::plain(OutputKind::Error, message),
+                        OutputEntry::plain(OutputKind::Error, message.clone()),
                     );
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target,
+                        elapsed: elapsed.unwrap_or(Duration::ZERO),
+                        outcome: crate::logger::SqlLogOutcome::Failure { message },
+                        sql: "commit;".to_owned(),
+                    });
                     self.retain_failed_deferred();
                     if unknown || event == TransactionEvent::OutcomeUnknown {
                         return self.reconcile_catalog_change(
@@ -9973,6 +10026,7 @@ impl App {
                     TransactionState::RollingBack,
                 ) {
                     let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    let connection_name = self.connection_name_for(&connection);
                     let tab = self
                         .tabs
                         .iter_mut()
@@ -9982,6 +10036,11 @@ impl App {
                     if let Ok(next) =
                         transaction::transition(tab_snapshot(tab), TransactionEvent::RolledBack)
                     {
+                        let target = tab
+                            .execution_target
+                            .as_ref()
+                            .map(console_target_label)
+                            .unwrap_or_default();
                         tab.pending_catalog_change_impact = sql::CatalogChangeImpact::None;
                         apply_transaction_snapshot(tab, next);
                         append_transaction_status(
@@ -9990,6 +10049,16 @@ impl App {
                             "transaction rolled back",
                             elapsed,
                         );
+                        self.sql_logger.log(crate::logger::SqlLogRecord {
+                            timestamp: chrono::Local::now(),
+                            connection: connection_name,
+                            target,
+                            elapsed: elapsed.unwrap_or(Duration::ZERO),
+                            outcome: crate::logger::SqlLogOutcome::MutationSuccess {
+                                affected_rows: 0,
+                            },
+                            sql: "rollback;".to_owned(),
+                        });
                         return self.finish_deferred(tab_id);
                     }
                 }
@@ -10011,7 +10080,8 @@ impl App {
                     connection,
                     TransactionState::RollingBack,
                 ) {
-                    self.clear_transaction_op_timing(tab_id);
+                    let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    let connection_name = self.connection_name_for(&connection);
                     let mut reconcile = None;
                     let tab = self
                         .tabs
@@ -10019,6 +10089,11 @@ impl App {
                         .find(|tab| tab.id() == tab_id)
                         .and_then(WorkspaceTab::as_console_mut)
                         .unwrap();
+                    let target = tab
+                        .execution_target
+                        .as_ref()
+                        .map(console_target_label)
+                        .unwrap_or_default();
                     let event = if unknown {
                         TransactionEvent::OutcomeUnknown
                     } else {
@@ -10039,8 +10114,16 @@ impl App {
                     append_console_output_to_editor(
                         &mut self.editor,
                         tab,
-                        OutputEntry::plain(OutputKind::Error, message),
+                        OutputEntry::plain(OutputKind::Error, message.clone()),
                     );
+                    self.sql_logger.log(crate::logger::SqlLogRecord {
+                        timestamp: chrono::Local::now(),
+                        connection: connection_name,
+                        target,
+                        elapsed: elapsed.unwrap_or(Duration::ZERO),
+                        outcome: crate::logger::SqlLogOutcome::Failure { message },
+                        sql: "rollback;".to_owned(),
+                    });
                     self.retain_failed_deferred();
                     if unknown || event == TransactionEvent::OutcomeUnknown {
                         return self.reconcile_catalog_change(
@@ -21994,6 +22077,25 @@ mod tests {
         );
     }
 
+    async fn wait_for_log_content<F>(log_path: &std::path::Path, predicate: F) -> String
+    where
+        F: Fn(&str) -> bool,
+    {
+        let start = tokio::time::Instant::now();
+        let timeout = Duration::from_millis(500);
+        let mut content = String::new();
+        while start.elapsed() < timeout {
+            if let Ok(c) = std::fs::read_to_string(log_path) {
+                if predicate(&c) {
+                    return c;
+                }
+                content = c;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        content
+    }
+
     #[tokio::test]
     async fn finish_query_records_success_in_sql_logger() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -22027,8 +22129,8 @@ mod tests {
             },
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            wait_for_log_content(&log_path, |c| c.contains("SELECT id, name FROM users")).await;
         assert!(content.contains("[kms/kms]"));
         assert!(content.contains("[OK 15ms 1 rows]"));
         assert!(content.contains("SELECT id, name FROM users"));
@@ -22058,8 +22160,8 @@ mod tests {
             },
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            wait_for_log_content(&log_path, |c| c.contains("UPDATE users SET name = 'test'")).await;
         assert!(content.contains("[kms/kms]"));
         assert!(content.contains("[OK 13ms 3 row(s) affected]"));
         assert!(content.contains("UPDATE users SET name = 'test'"));
@@ -22082,10 +22184,33 @@ mod tests {
             message: "relation \"non_existent\" does not exist".into(),
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            wait_for_log_content(&log_path, |c| c.contains("SELECT * FROM non_existent")).await;
         assert!(content.contains("[kms/kms]"));
         assert!(content.contains("[ERROR 0ms: relation \"non_existent\" does not exist]"));
+        assert!(content.contains("SELECT * FROM non_existent"));
+    }
+
+    #[tokio::test]
+    async fn query_page_failed_records_failure_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let (mut app, tab_id, generation) = connected_query_app("SELECT * FROM non_existent");
+        app = app.with_sql_logger(logger);
+        let connection = app.connection.active_identity().unwrap();
+
+        app.update(Action::QueryPageFailed {
+            tab_id,
+            generation,
+            connection,
+            message: "error fetching page".into(),
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("error fetching page")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: error fetching page]"));
         assert!(content.contains("SELECT * FROM non_existent"));
     }
 
@@ -22112,11 +22237,210 @@ mod tests {
             message: "syntax error at or near \"broken\"".into(),
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("syntax error at or near \"broken\"")
+        })
+        .await;
         assert!(content.contains("[kms/kms]"));
         assert!(content.contains("[ERROR 0ms: syntax error at or near \"broken\"]"));
         assert!(content.contains("SELECT 1"));
+    }
+
+    #[tokio::test]
+    async fn manual_committed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.update(Action::NewConsole);
+        app.connection.target = app.active_console().execution_target.clone();
+        let connection = app.connection.active_identity().unwrap();
+
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+
+        let commands = app.update(Action::CommitTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualCommit {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualCommitted {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("commit;")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("0 row(s) affected"));
+        assert!(content.contains("commit;"));
+    }
+
+    #[tokio::test]
+    async fn manual_commit_failed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.update(Action::NewConsole);
+        app.connection.target = app.active_console().execution_target.clone();
+        let connection = app.connection.active_identity().unwrap();
+
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+
+        let commands = app.update(Action::CommitTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualCommit {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualCommitFailed {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+            message: "commit failed error".into(),
+            unknown: false,
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("commit failed error")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: commit failed error]"));
+        assert!(content.contains("commit;"));
+    }
+
+    #[tokio::test]
+    async fn manual_rolled_back_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.update(Action::NewConsole);
+        app.connection.target = app.active_console().execution_target.clone();
+        let connection = app.connection.active_identity().unwrap();
+
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+
+        let commands = app.update(Action::RollbackTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualRollback {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualRolledBack {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+        });
+
+        let content = wait_for_log_content(&log_path, |c| c.contains("rollback;")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("0 row(s) affected"));
+        assert!(content.contains("rollback;"));
+    }
+
+    #[tokio::test]
+    async fn manual_rollback_failed_records_in_sql_logger() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (logger, log_path) =
+            crate::logger::SqlLogger::init(Some(temp_dir.path().to_path_buf())).unwrap();
+
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let profile_id = profile.id;
+        let mut app = App::new(vec![profile]).with_sql_logger(logger);
+        app.connection.profile_id = Some(profile_id);
+        app.connection.generation = 1;
+        app.connection.status = ConnectionStatus::Connected;
+        app.update(Action::NewConsole);
+        app.connection.target = app.active_console().execution_target.clone();
+        let connection = app.connection.active_identity().unwrap();
+
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+
+        let commands = app.update(Action::RollbackTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualRollback {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualRollbackFailed {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+            message: "rollback failed error".into(),
+            unknown: false,
+        });
+
+        let content =
+            wait_for_log_content(&log_path, |c| c.contains("rollback failed error")).await;
+        assert!(content.contains("[kms/kms]"));
+        assert!(content.contains("[ERROR 0ms: rollback failed error]"));
+        assert!(content.contains("rollback;"));
     }
 
     #[tokio::test]
@@ -22183,8 +22507,9 @@ mod tests {
             },
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content =
+            wait_for_log_content(&log_path, |c| c.contains("DROP TABLE \"public\".\"users\""))
+                .await;
         assert!(content.contains("[kms/kms.public]"));
         assert!(content.contains("[OK 25ms 0 row(s) affected]"));
         assert!(content.contains("DROP TABLE \"public\".\"users\""));
@@ -22194,8 +22519,10 @@ mod tests {
             message: "table is referenced by foreign key".into(),
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("table is referenced by foreign key")
+        })
+        .await;
         assert!(content.contains("[ERROR 0ms: table is referenced by foreign key]"));
 
         let mutation_request = crate::db::catalog_mutation::CatalogMutationRequest {
@@ -22236,8 +22563,10 @@ mod tests {
             },
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content = wait_for_log_content(&log_path, |c| {
+            c.contains("CREATE TABLE \"public\".\"posts\" (id INT)")
+        })
+        .await;
         assert!(content.contains("[OK 30ms 0 row(s) affected]"));
         assert!(content.contains("CREATE TABLE \"public\".\"posts\" (id INT)"));
 
@@ -22246,8 +22575,7 @@ mod tests {
             message: "table already exists".into(),
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let content = std::fs::read_to_string(&log_path).unwrap();
+        let content = wait_for_log_content(&log_path, |c| c.contains("table already exists")).await;
         assert!(content.contains("[ERROR 0ms: table already exists]"));
     }
 }
