@@ -16,6 +16,7 @@ pub mod record_view;
 pub mod relation;
 pub mod relation_edit;
 pub mod relation_review;
+pub mod sql_activity;
 pub mod sql_editor_list;
 pub mod tab;
 pub mod text_detail;
