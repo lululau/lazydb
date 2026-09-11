@@ -43,3 +43,6 @@ Thumbs.db
 # CodeGraph index
 /.codegraph/
 .worktrees/
+
+# Brainstorm / agent local artifacts
+.superpowers/
