@@ -226,7 +226,7 @@ Do **not** append on rollback success/failure, commit failure, or auto-mode stat
 | Yank with empty focus/text | No-op or brief notification |
 | Dashboard / unsupported tab | Notification; no overlay |
 | Another blocking overlay already open | No-op + `Close the current dialog first` |
-| Committing / RollingBack | PENDING still visible (scrollable); Enter no-op until state returns to a controllable confirmable state, matching existing Review gating |
+| Committing / RollingBack | PENDING still visible (scrollable); Enter **always calls** the tab’s confirm helper. Keep SQL Activity only if the helper refuses; do not add extra pre-checks beyond what the helper already enforces |
 
 ---
 
@@ -240,7 +240,8 @@ Do **not** append on rollback success/failure, commit failure, or auto-mode stat
    - `ManualCommitted` / relation commit success append one batch and clear pending source.
    - Rollback clears pending and does not append.
    - Cap at 50 batches.
-   - Enter from PENDING opens `TransactionExitConfirm` (Console) or `RelationTransactionConfirm` (Relation).
+   - Enter from PENDING opens `TransactionExitConfirm` (Console via `OpenTransactionControl` / `open_console_transaction_control`, never `CommitTransaction`) or `RelationTransactionConfirm` (Relation).
+   - Idle-clear paths empty `pending_transaction_sql`; TransactionControl-only executes do not append; blank-line join is preserved.
    - Esc dismisses without side effects.
    - PENDING `j`/`k` only changes scroll; COMMITTED `j`/`k` changes batch cursor.
 
