@@ -1101,6 +1101,7 @@ fn overlay_key(overlay: &Overlay) -> u8 {
         Overlay::PageSizeSelector { .. } => 15,
         Overlay::CatalogDropConfirm { .. } | Overlay::CatalogEditorDestructiveConfirm { .. } => 16,
         Overlay::CatalogEditorDiscardConfirm { .. } => 17,
+        Overlay::SqlActivity(_) => 24,
     }
 }
 
@@ -4527,7 +4528,17 @@ fn render_overlay(
         Overlay::ExplorerAdd(menu) => {
             render_explorer_add(frame, area, app, menu, state, theme, icons)
         }
+        Overlay::SqlActivity(_) => render_sql_activity_overlay_stub(frame, area),
     }
+}
+
+fn render_sql_activity_overlay_stub(frame: &mut Frame<'_>, area: Rect) {
+    let popup = centered(
+        area,
+        72.min(area.width.saturating_sub(4)),
+        16.min(area.height),
+    );
+    frame.render_widget(Clear, popup);
 }
 
 fn render_transaction_menu(

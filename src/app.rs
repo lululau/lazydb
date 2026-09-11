@@ -70,7 +70,8 @@ use crate::{
         workspace::{
             ConnectionIdentity, ConnectionState, ConnectionStatus, ConnectionWorkspace,
             ExecutionConfirmFocus, ExplorerState, Focus, ManualCancelFocus, Overlay,
-            PaneLayoutMetrics, PaneSizePreferences, QueryStatus,
+            PaneLayoutMetrics, PaneSizePreferences, QueryStatus, SqlActivitySection,
+            SqlActivityState,
         },
     },
     persistence::workspace::{
@@ -8212,6 +8213,14 @@ impl App {
                 self.update(Action::OpenTransactionMenu)
             }
             Action::OpenTransactionControl => self.open_transaction_control(),
+            Action::OpenSqlActivity => self.open_sql_activity(),
+            Action::SqlActivityToggleSection => self.sql_activity_toggle_section(),
+            Action::SqlActivityPendingScroll(delta) => self.sql_activity_pending_scroll(delta),
+            Action::SqlActivityCommittedMove(delta) => self.sql_activity_committed_move(delta),
+            Action::SqlActivityToggleExpand => self.sql_activity_toggle_expand(),
+            Action::SqlActivityEnter => self.sql_activity_enter(),
+            Action::SqlActivityYank => self.sql_activity_yank(),
+            Action::SqlActivityDismiss => self.sql_activity_dismiss(),
             Action::OpenTransactionMenu => {
                 if self.active_console_opt().is_some() {
                     let availability = self.transaction_menu_availability();
@@ -11126,6 +11135,246 @@ impl App {
             preview_offset: 0,
             edit_snapshot: tab.edit.as_ref().map(|edit| format!("{edit:?}")),
         });
+        Vec::new()
+    }
+
+    fn sql_activity_overlay_is_blocking(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(
+                Overlay::ExecutionConfirm { .. }
+                    | Overlay::TransactionExitConfirm { .. }
+                    | Overlay::RelationTransactionConfirm { .. }
+                    | Overlay::ManualCancelConfirm { .. }
+                    | Overlay::CatalogEditorDestructiveConfirm { .. }
+                    | Overlay::CatalogDropConfirm { busy: true, .. }
+            )
+        )
+    }
+
+    fn open_sql_activity(&mut self) -> Vec<Command> {
+        if self.sql_activity_overlay_is_blocking() {
+            self.notify_warning("SQL Activity", "Close the current dialog first");
+            return Vec::new();
+        }
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            self.notify_warning("SQL Activity", "Open a SQL console or relation tab first");
+            return Vec::new();
+        };
+        match tab {
+            WorkspaceTab::Sql(_) | WorkspaceTab::Relation(_) => {
+                self.overlay = Some(Overlay::SqlActivity(SqlActivityState {
+                    tab_id: tab.id(),
+                    section: SqlActivitySection::Pending,
+                    pending_scroll: 0,
+                    committed_cursor: 0,
+                    expanded: BTreeSet::new(),
+                    status_hint: None,
+                }));
+            }
+            WorkspaceTab::Dashboard(_) => {
+                self.notify_warning("SQL Activity", "Open a SQL console or relation tab first");
+            }
+        }
+        Vec::new()
+    }
+
+    fn sql_activity_tab_present(&self, tab_id: Uuid) -> bool {
+        self.tabs.get(self.active_tab).is_some_and(|tab| {
+            tab.id() == tab_id && matches!(tab, WorkspaceTab::Sql(_) | WorkspaceTab::Relation(_))
+        })
+    }
+
+    fn sql_activity_state(&self) -> Option<&SqlActivityState> {
+        match self.overlay.as_ref() {
+            Some(Overlay::SqlActivity(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn sql_activity_state_mut(&mut self) -> Option<&mut SqlActivityState> {
+        let tab_id = self.sql_activity_state()?.tab_id;
+        if !self.sql_activity_tab_present(tab_id) {
+            self.overlay = None;
+            return None;
+        }
+        match self.overlay.as_mut() {
+            Some(Overlay::SqlActivity(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    fn sql_activity_toggle_section(&mut self) -> Vec<Command> {
+        if let Some(state) = self.sql_activity_state_mut() {
+            state.section = match state.section {
+                SqlActivitySection::Pending => SqlActivitySection::Committed,
+                SqlActivitySection::Committed => SqlActivitySection::Pending,
+            };
+        }
+        Vec::new()
+    }
+
+    fn sql_activity_pending_scroll(&mut self, delta: i16) -> Vec<Command> {
+        if let Some(state) = self.sql_activity_state_mut() {
+            let next = i32::from(state.pending_scroll) + i32::from(delta);
+            state.pending_scroll = u16::try_from(next.max(0)).unwrap_or(u16::MAX);
+        }
+        Vec::new()
+    }
+
+    fn sql_activity_committed_count(&self, tab_id: Uuid) -> usize {
+        match self.tabs.iter().find(|tab| tab.id() == tab_id) {
+            Some(WorkspaceTab::Sql(tab)) => tab.committed_sql_batches.len(),
+            Some(WorkspaceTab::Relation(tab)) => tab.committed_sql_batches.len(),
+            _ => 0,
+        }
+    }
+
+    fn sql_activity_committed_move(&mut self, delta: isize) -> Vec<Command> {
+        let Some(tab_id) = self.sql_activity_state().map(|state| state.tab_id) else {
+            return Vec::new();
+        };
+        if !self.sql_activity_tab_present(tab_id) {
+            self.overlay = None;
+            return Vec::new();
+        }
+        let count = self.sql_activity_committed_count(tab_id);
+        if let Some(state) = self.sql_activity_state_mut() {
+            if count == 0 {
+                state.committed_cursor = 0;
+            } else {
+                let max = isize::try_from(count.saturating_sub(1)).unwrap_or(0);
+                let next = isize::try_from(state.committed_cursor).unwrap_or(0) + delta;
+                state.committed_cursor = usize::try_from(next.clamp(0, max)).unwrap_or(0);
+            }
+        }
+        Vec::new()
+    }
+
+    fn sql_activity_toggle_expand(&mut self) -> Vec<Command> {
+        if let Some(state) = self.sql_activity_state_mut() {
+            let cursor = state.committed_cursor;
+            if !state.expanded.remove(&cursor) {
+                state.expanded.insert(cursor);
+            }
+        }
+        Vec::new()
+    }
+
+    fn sql_activity_restore_with_hint(
+        &mut self,
+        previous: Option<Overlay>,
+        before_notification_id: Option<u64>,
+    ) {
+        let Some(Overlay::SqlActivity(mut state)) = previous else {
+            return;
+        };
+        state.status_hint = self
+            .notifications
+            .history()
+            .next()
+            .filter(|notification| Some(notification.id) != before_notification_id)
+            .map(|notification| notification.body.clone())
+            .or_else(|| Some("Transaction control is unavailable".into()));
+        self.overlay = Some(Overlay::SqlActivity(state));
+    }
+
+    fn sql_activity_enter(&mut self) -> Vec<Command> {
+        let Some((tab_id, section)) = self
+            .sql_activity_state()
+            .map(|state| (state.tab_id, state.section))
+        else {
+            return Vec::new();
+        };
+        if !self.sql_activity_tab_present(tab_id) {
+            self.overlay = None;
+            return Vec::new();
+        }
+        if section == SqlActivitySection::Committed {
+            return self.sql_activity_toggle_expand();
+        }
+        let is_relation = matches!(
+            self.tabs.iter().find(|tab| tab.id() == tab_id),
+            Some(WorkspaceTab::Relation(_))
+        );
+        let before_notification_id = self.notifications.history().next().map(|n| n.id);
+        let previous = self.overlay.take();
+        let commands = if is_relation {
+            self.open_relation_transaction_control(tab_id, DeferredIntent::Stay)
+        } else {
+            self.open_console_transaction_control()
+        };
+        let opened_confirm = matches!(
+            self.overlay,
+            Some(Overlay::TransactionExitConfirm { .. })
+                | Some(Overlay::RelationTransactionConfirm { .. })
+        );
+        if !opened_confirm {
+            self.sql_activity_restore_with_hint(previous, before_notification_id);
+        }
+        commands
+    }
+
+    fn sql_activity_focused_text(&self) -> Option<(SqlActivitySection, String)> {
+        let state = self.sql_activity_state()?;
+        let tab_id = state.tab_id;
+        let section = state.section;
+        let cursor = state.committed_cursor;
+        let text = match self.tabs.iter().find(|tab| tab.id() == tab_id) {
+            Some(WorkspaceTab::Sql(tab)) => match section {
+                SqlActivitySection::Pending => tab.pending_transaction_sql.clone(),
+                SqlActivitySection::Committed => tab
+                    .committed_sql_batches
+                    .get(cursor)
+                    .map(|batch| batch.sql.clone())
+                    .unwrap_or_default(),
+            },
+            Some(WorkspaceTab::Relation(tab)) => match section {
+                SqlActivitySection::Pending => {
+                    tab.transaction_review_sql.clone().unwrap_or_default()
+                }
+                SqlActivitySection::Committed => tab
+                    .committed_sql_batches
+                    .get(cursor)
+                    .map(|batch| batch.sql.clone())
+                    .unwrap_or_default(),
+            },
+            _ => return None,
+        };
+        Some((section, text))
+    }
+
+    fn sql_activity_yank(&mut self) -> Vec<Command> {
+        let Some(tab_id) = self.sql_activity_state().map(|state| state.tab_id) else {
+            return Vec::new();
+        };
+        if !self.sql_activity_tab_present(tab_id) {
+            self.overlay = None;
+            return Vec::new();
+        }
+        let Some((section, text)) = self.sql_activity_focused_text() else {
+            self.overlay = None;
+            return Vec::new();
+        };
+        if text.trim().is_empty() {
+            self.notify_warning("Clipboard", "Nothing to copy");
+            return Vec::new();
+        }
+        let description = match section {
+            SqlActivitySection::Pending => "pending SQL",
+            SqlActivitySection::Committed => "committed SQL batch",
+        };
+        vec![Command::WriteClipboard(ClipboardPayload {
+            text,
+            description: description.into(),
+            sensitive: false,
+        })]
+    }
+
+    fn sql_activity_dismiss(&mut self) -> Vec<Command> {
+        if matches!(self.overlay, Some(Overlay::SqlActivity(_))) {
+            self.overlay = None;
+        }
         Vec::new()
     }
 
@@ -18393,7 +18642,7 @@ mod tests {
         model::transaction::{TransactionMode, TransactionState},
         model::workspace::{
             ConnectionStatus, Focus, Overlay, PaneLayoutMetrics, PaneResize, PaneSizePreferences,
-            PaneSplit, QueryStatus,
+            PaneSplit, QueryStatus, SqlActivitySection, SqlActivityState,
         },
         model::{
             data_query::{DataQueryCapability, DataQueryInput, DataQueryOptions},
@@ -18855,7 +19104,9 @@ mod tests {
         tab.transaction_generation = 3;
         tab.transaction_state = TransactionState::Committing;
         tab.transaction_review_sql = Some("UPDATE t SET a=1 WHERE id=1;".into());
-        tab.edit = Some(RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]));
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+        ]]));
         let tab_id = tab.id;
         app.tabs.push(WorkspaceTab::Relation(tab));
 
@@ -18870,11 +19121,16 @@ mod tests {
             None,
         );
 
-        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap() else {
+        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap()
+        else {
             panic!();
         };
         assert_eq!(tab.committed_sql_batches.len(), 1);
-        assert!(tab.committed_sql_batches[0].sql.contains("UPDATE t SET a=1"));
+        assert!(
+            tab.committed_sql_batches[0]
+                .sql
+                .contains("UPDATE t SET a=1")
+        );
         assert!(tab.transaction_review_sql.is_none());
     }
 
@@ -18887,7 +19143,9 @@ mod tests {
         tab.transaction_review_sql = Some("UPDATE t SET a=1 WHERE id=1;".into());
         let snapshot = RelationEditSession::from_rows(vec![vec![CellValue::Integer(1)]]);
         tab.transaction_snapshot = Some(snapshot.clone());
-        tab.edit = Some(RelationEditSession::from_rows(vec![vec![CellValue::Integer(2)]]));
+        tab.edit = Some(RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(2),
+        ]]));
         let tab_id = tab.id;
         app.tabs.push(WorkspaceTab::Relation(tab));
 
@@ -18902,7 +19160,8 @@ mod tests {
             None,
         );
 
-        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap() else {
+        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap()
+        else {
             panic!();
         };
         assert!(tab.committed_sql_batches.is_empty());
@@ -19293,6 +19552,165 @@ mod tests {
             tab.committed_sql_batches.front().unwrap().sql,
             "INSERT INTO t VALUES (1)"
         );
+    }
+
+    #[test]
+    fn open_sql_activity_on_console_with_pending() {
+        let mut app = App::new(Vec::new());
+        let tab_id = app.active_console().id;
+        app.active_console_mut().pending_transaction_sql = "UPDATE users SET name = 'ada';".into();
+
+        assert!(app.update(Action::OpenSqlActivity).is_empty());
+        match &app.overlay {
+            Some(Overlay::SqlActivity(state)) => {
+                assert_eq!(state.tab_id, tab_id);
+                assert_eq!(state.section, SqlActivitySection::Pending);
+                assert_eq!(state.pending_scroll, 0);
+                assert_eq!(state.committed_cursor, 0);
+                assert!(state.expanded.is_empty());
+                assert!(state.status_hint.is_none());
+            }
+            other => panic!("expected SqlActivity overlay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_sql_activity_on_dashboard_notifies() {
+        let profile = import_connection_url("postgres://localhost/kms", Some("kms"))
+            .unwrap()
+            .profile;
+        let mut app = App::new(vec![profile]);
+        app.tabs.push(WorkspaceTab::Dashboard(
+            crate::model::dashboard::DashboardTab::new(),
+        ));
+        app.active_tab = app.tabs.len() - 1;
+
+        assert!(app.update(Action::OpenSqlActivity).is_empty());
+        assert!(!matches!(app.overlay, Some(Overlay::SqlActivity(_))));
+        let notification = app
+            .notifications
+            .history()
+            .next()
+            .expect("dashboard warning");
+        assert_eq!(notification.title, "SQL Activity");
+        assert_eq!(
+            notification.body,
+            "Open a SQL console or relation tab first"
+        );
+    }
+
+    #[test]
+    fn sql_activity_enter_opens_transaction_exit_confirm_not_commit() {
+        let mut app = App::new(Vec::new());
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        tab.pending_transaction_sql = "UPDATE users SET name = 'ada';".into();
+        let tab_id = tab.id;
+        app.overlay = Some(Overlay::SqlActivity(SqlActivityState {
+            tab_id,
+            section: SqlActivitySection::Pending,
+            pending_scroll: 0,
+            committed_cursor: 0,
+            expanded: Default::default(),
+            status_hint: None,
+        }));
+
+        assert!(app.update(Action::SqlActivityEnter).is_empty());
+        assert!(
+            matches!(app.overlay, Some(Overlay::TransactionExitConfirm { .. })),
+            "overlay: {:?}",
+            app.overlay
+        );
+        assert_eq!(
+            app.active_console().transaction_state,
+            TransactionState::Active
+        );
+    }
+
+    #[test]
+    fn sql_activity_yank_pending_writes_clipboard_command() {
+        let mut app = App::new(Vec::new());
+        let sql = "UPDATE users SET name = 'ada';";
+        let tab = app.active_console_mut();
+        tab.pending_transaction_sql = sql.into();
+        let tab_id = tab.id;
+        app.overlay = Some(Overlay::SqlActivity(SqlActivityState {
+            tab_id,
+            section: SqlActivitySection::Pending,
+            pending_scroll: 0,
+            committed_cursor: 0,
+            expanded: Default::default(),
+            status_hint: None,
+        }));
+
+        match app.update(Action::SqlActivityYank).as_slice() {
+            [Command::WriteClipboard(payload)] => assert_eq!(payload.text, sql),
+            other => panic!("expected WriteClipboard, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_sql_activity_refuses_blocking_overlay() {
+        let mut app = App::new(Vec::new());
+        let tab_id = app.active_console().id;
+        app.overlay = Some(Overlay::TransactionExitConfirm {
+            prompt: crate::model::transaction::DeferredTransactionPrompt {
+                target: crate::model::transaction::DeferredTransactionTarget::Console(tab_id),
+                transaction_generation: 0,
+                intent: crate::model::transaction::DeferredIntent::Stay,
+            },
+            choice: crate::model::transaction::TransactionExitChoice::Cancel,
+        });
+
+        assert!(app.update(Action::OpenSqlActivity).is_empty());
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::TransactionExitConfirm { .. })
+        ));
+        let notification = app
+            .notifications
+            .history()
+            .next()
+            .expect("blocking warning");
+        assert_eq!(notification.body, "Close the current dialog first");
+    }
+
+    #[test]
+    fn sql_activity_enter_opens_relation_transaction_confirm() {
+        let mut app = App::new(Vec::new());
+        let mut tab = RelationTab::new("public.users");
+        tab.transaction_state = TransactionState::Active;
+        tab.transaction_review_sql = Some("UPDATE t SET a=1 WHERE id=1;".into());
+        let tab_id = tab.id;
+        app.tabs.push(WorkspaceTab::Relation(tab));
+        app.active_tab = app.tabs.len() - 1;
+        app.overlay = Some(Overlay::SqlActivity(SqlActivityState {
+            tab_id,
+            section: SqlActivitySection::Pending,
+            pending_scroll: 0,
+            committed_cursor: 0,
+            expanded: Default::default(),
+            status_hint: None,
+        }));
+
+        assert!(app.update(Action::SqlActivityEnter).is_empty());
+        match &app.overlay {
+            Some(Overlay::RelationTransactionConfirm {
+                tab_id: opened,
+                sql,
+                ..
+            }) => {
+                assert_eq!(*opened, tab_id);
+                assert!(sql.contains("UPDATE t SET a=1"));
+            }
+            other => panic!("expected RelationTransactionConfirm, got {other:?}"),
+        }
+        let WorkspaceTab::Relation(tab) = app.tabs.iter().find(|t| t.id() == tab_id).unwrap()
+        else {
+            panic!("relation tab");
+        };
+        assert_eq!(tab.transaction_state, TransactionState::Active);
     }
 
     #[test]

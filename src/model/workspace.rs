@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use uuid::Uuid;
 
@@ -184,6 +184,23 @@ pub enum Overlay {
     CatalogEditorDiscardConfirm {
         focus: CatalogEditorDiscardFocus,
     },
+    SqlActivity(SqlActivityState),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SqlActivitySection {
+    Pending,
+    Committed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SqlActivityState {
+    pub tab_id: Uuid,
+    pub section: SqlActivitySection,
+    pub pending_scroll: u16,
+    pub committed_cursor: usize,
+    pub expanded: BTreeSet<usize>,
+    pub status_hint: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

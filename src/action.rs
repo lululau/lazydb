@@ -11,13 +11,13 @@ use crate::db::catalog_mutation::{
     CatalogOwnerContextRequest,
 };
 use crate::db::{
-    ErrorCategory, ServerInfo,
     catalog::{
         CatalogCapabilities, CatalogDiscovery, CatalogEntry, CatalogId, CatalogPage,
         CatalogRequest, CatalogRequestKey, CatalogSearchPage, CatalogSearchRequest, CatalogTarget,
     },
     catalog_drop::{CatalogDropError, CatalogDropPlan, CatalogDropRequest},
     query::QueryOutcome,
+    ErrorCategory, ServerInfo,
 };
 use crate::{
     clipboard::ClipboardPayload,
@@ -548,6 +548,14 @@ pub enum Action {
     SetTransactionMode(crate::model::transaction::TransactionMode),
     ActivateEditorTransaction,
     OpenTransactionControl,
+    OpenSqlActivity,
+    SqlActivityToggleSection,
+    SqlActivityPendingScroll(i16),
+    SqlActivityCommittedMove(isize),
+    SqlActivityToggleExpand,
+    SqlActivityEnter,
+    SqlActivityYank,
+    SqlActivityDismiss,
     OpenTransactionMenu,
     SelectTransactionMenu(usize),
     MoveTransactionMenu(isize),
