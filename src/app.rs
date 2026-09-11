@@ -18700,21 +18700,29 @@ fn parse_relation_value(
             .parse()
             .map(CellValue::Float)
             .map_err(|_| "invalid floating-point number".into()),
-        CellValue::Date(_) => value
-            .parse()
+        CellValue::Date(_) => chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .or_else(|_| value.parse())
             .map(CellValue::Date)
             .map_err(|_| "invalid date; expected YYYY-MM-DD".into()),
-        CellValue::Time(_) => value
-            .parse()
+        CellValue::Time(_) => chrono::NaiveTime::parse_from_str(value, "%H:%M:%S%.f")
+            .or_else(|_| chrono::NaiveTime::parse_from_str(value, "%H:%M:%S"))
+            .or_else(|_| value.parse())
             .map(CellValue::Time)
             .map_err(|_| "invalid time; expected HH:MM:SS[.fraction]".into()),
-        CellValue::DateTime(_) => value
-            .parse()
-            .map(CellValue::DateTime)
-            .map_err(|_| "invalid datetime; expected YYYY-MM-DD HH:MM:SS[.fraction]".into()),
-        CellValue::Timestamp(_) => value
-            .parse()
-            .map(CellValue::Timestamp)
+        CellValue::DateTime(_) => {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S"))
+                .or_else(|_| value.parse())
+                .map(CellValue::DateTime)
+                .map_err(|_| "invalid datetime; expected YYYY-MM-DD HH:MM:SS[.fraction]".into())
+        }
+        CellValue::Timestamp(_) => chrono::DateTime::parse_from_rfc3339(value)
+            .map(|value| CellValue::Timestamp(value.fixed_offset()))
+            .or_else(|_| {
+                chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f %:z")
+                    .map(CellValue::Timestamp)
+            })
+            .or_else(|_| value.parse().map(CellValue::Timestamp))
             .map_err(|_| "invalid timestamp; expected an RFC 3339 timestamp".into()),
         _ if type_name.to_ascii_lowercase().contains("bool") => value
             .parse()

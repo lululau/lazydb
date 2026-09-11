@@ -1304,9 +1304,11 @@ pub(crate) fn classify_column_type(
         DatabaseKind::Postgres => match base_name {
             "bool" | "boolean" => Some(CellEditorKind::Boolean),
             "date" => Some(CellEditorKind::Date),
-            "time" => Some(CellEditorKind::Time),
-            "timestamp" => Some(CellEditorKind::DateTime),
-            "timestamptz" => Some(CellEditorKind::Timestamp),
+            "time" | "timetz" | "time without time zone" | "time with time zone" => {
+                Some(CellEditorKind::Time)
+            }
+            "timestamp" | "timestamp without time zone" => Some(CellEditorKind::DateTime),
+            "timestamptz" | "timestamp with time zone" => Some(CellEditorKind::Timestamp),
             "json" | "jsonb" => Some(CellEditorKind::Json),
             _ => None,
         },
@@ -1314,11 +1316,26 @@ pub(crate) fn classify_column_type(
             "bit" => Some(CellEditorKind::Boolean),
             "date" => Some(CellEditorKind::Date),
             "time" => Some(CellEditorKind::Time),
-            "datetime2" => Some(CellEditorKind::DateTime),
+            "datetime" | "datetime2" | "smalldatetime" => Some(CellEditorKind::DateTime),
             "datetimeoffset" => Some(CellEditorKind::Timestamp),
             _ => None,
         },
-        DatabaseKind::MySql | DatabaseKind::Sqlite => None,
+        DatabaseKind::MySql => match base_name {
+            "bool" | "boolean" => Some(CellEditorKind::Boolean),
+            "date" => Some(CellEditorKind::Date),
+            "time" => Some(CellEditorKind::Time),
+            "datetime" | "timestamp" => Some(CellEditorKind::DateTime),
+            "json" => Some(CellEditorKind::Json),
+            _ => None,
+        },
+        DatabaseKind::Sqlite => match base_name {
+            "bool" | "boolean" => Some(CellEditorKind::Boolean),
+            "date" => Some(CellEditorKind::Date),
+            "time" => Some(CellEditorKind::Time),
+            "datetime" | "timestamp" => Some(CellEditorKind::DateTime),
+            "json" => Some(CellEditorKind::Json),
+            _ => None,
+        },
     }?;
 
     Some(ColumnEditorDescription { kind })
@@ -1527,8 +1544,9 @@ mod tests {
     }
 
     #[test]
-    fn keeps_mysql_and_sqlite_type_inference_conservative() {
-        for type_name in ["tinyint(1)", "TINYINT (1)", "boolean", "date", "json"] {
+    fn keeps_mysql_and_sqlite_non_temporal_inference_conservative() {
+        // Avoid promoting ambiguous MySQL/SQLite affinities into typed editors.
+        for type_name in ["tinyint(1)", "TINYINT (1)", "int", "varchar(32)", "text"] {
             assert_eq!(
                 classify_column_type(DatabaseKind::MySql, type_name),
                 None,
@@ -1536,7 +1554,7 @@ mod tests {
             );
         }
 
-        for type_name in ["1", "true", "2024-01-01", "text", "json"] {
+        for type_name in ["1", "true", "2024-01-01", "text", "BLOB"] {
             assert_eq!(
                 classify_column_type(DatabaseKind::Sqlite, type_name),
                 None,
@@ -1738,5 +1756,62 @@ mod tests {
             None,
             "unprovided JSON must not become the JSON literal null"
         );
+    }
+
+    #[test]
+    fn classifies_mysql_sqlite_and_postgres_datetime_aliases() {
+        for (db, ty, expected) in [
+            (
+                DatabaseKind::Postgres,
+                "timestamp without time zone",
+                Some(CellEditorKind::DateTime),
+            ),
+            (
+                DatabaseKind::Postgres,
+                "timestamp with time zone",
+                Some(CellEditorKind::Timestamp),
+            ),
+            (
+                DatabaseKind::MySql,
+                "datetime",
+                Some(CellEditorKind::DateTime),
+            ),
+            (
+                DatabaseKind::MySql,
+                "timestamp",
+                Some(CellEditorKind::DateTime),
+            ),
+            (DatabaseKind::MySql, "date", Some(CellEditorKind::Date)),
+            (DatabaseKind::MySql, "time", Some(CellEditorKind::Time)),
+            (
+                DatabaseKind::Sqlite,
+                "DATETIME",
+                Some(CellEditorKind::DateTime),
+            ),
+            (DatabaseKind::Sqlite, "DATE", Some(CellEditorKind::Date)),
+            (DatabaseKind::Sqlite, "TIME", Some(CellEditorKind::Time)),
+        ] {
+            assert_eq!(
+                classify_column_type(db, ty).map(|description| description.kind),
+                expected,
+                "{db:?} {ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_relation_friendly_datetime_accepts_space_separated_values() {
+        use chrono::NaiveDateTime;
+
+        let value = "2023-01-15 11:14:26";
+        let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f")
+            .or_else(|_| NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S"))
+            .or_else(|_| value.parse::<NaiveDateTime>());
+        assert_eq!(
+            parsed.unwrap(),
+            NaiveDateTime::parse_from_str("2023-01-15 11:14:26", "%Y-%m-%d %H:%M:%S").unwrap()
+        );
+        // FromStr alone rejects the UI clipboard format.
+        assert!(value.parse::<NaiveDateTime>().is_err());
     }
 }
