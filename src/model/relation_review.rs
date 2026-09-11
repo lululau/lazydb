@@ -3,26 +3,60 @@ use crate::model::relation::{RelationLoad, RelationTab};
 use crate::model::relation_edit::{EditableRowState, RelationEditSession};
 use crate::model::transaction::TransactionState;
 
-/// Pending SQL for SQL Activity: stored review SQL if present, otherwise a live
-/// preview of local dirty edits (before Ctrl-s / TRANSACTION REVIEW).
+/// Shown while relation DDL / primary-key metadata is still loading.
+pub const PENDING_LOADING_PRIMARY_KEY: &str = "-- Loading primary key metadata…";
+
+/// Pending SQL for SQL Activity.
+///
+/// Mid-transaction prefers stored `transaction_review_sql`. Idle dirty edits use a
+/// live preview once DDL is Ready. While DDL is missing/loading, returns
+/// [`PENDING_LOADING_PRIMARY_KEY`] instead of falling back to all-column WHERE.
 pub fn activity_pending_sql(tab: &RelationTab) -> String {
-    if let Some(sql) = tab
-        .transaction_review_sql
-        .as_deref()
-        .filter(|sql| !sql.trim().is_empty())
+    let dirty = relation_has_dirty_edits(tab);
+    if tab.transaction_state != TransactionState::Idle
+        && let Some(sql) = tab
+            .transaction_review_sql
+            .as_deref()
+            .filter(|sql| !sql.trim().is_empty())
     {
         return sql.to_owned();
     }
-    let dirty = tab.edit.as_ref().is_some_and(|edit| {
-        edit.rows
-            .iter()
-            .any(|row| !matches!(row.state, EditableRowState::Clean))
-    });
     if !dirty && tab.transaction_state == TransactionState::Idle {
         return String::new();
     }
-    let Some(edit) = tab.edit.as_ref() else {
-        return String::new();
+    match preview_sql_for_tab(tab) {
+        Some(sql) => sql,
+        None => PENDING_LOADING_PRIMARY_KEY.to_owned(),
+    }
+}
+
+/// Rebuild stored review SQL from the current edit session when DDL is available.
+pub fn refresh_transaction_review_sql(tab: &mut RelationTab) {
+    if !relation_has_dirty_edits(tab) {
+        return;
+    }
+    if let Some(sql) = preview_sql_for_tab(tab) {
+        tab.transaction_review_sql = (!sql.trim().is_empty()).then_some(sql);
+    }
+}
+
+fn relation_has_dirty_edits(tab: &RelationTab) -> bool {
+    tab.edit.as_ref().is_some_and(|edit| {
+        edit.rows
+            .iter()
+            .any(|row| !matches!(row.state, EditableRowState::Clean))
+    })
+}
+
+/// Live preview when DDL is Ready. Returns `None` when DDL is not ready yet
+/// (caller should load metadata / show a loading placeholder).
+pub fn preview_sql_for_tab(tab: &RelationTab) -> Option<String> {
+    let edit = tab.edit.as_ref()?;
+    let primary_key_columns = match &tab.ddl {
+        RelationLoad::Ready(ddl) => {
+            crate::db::mutation::metadata_fingerprint(&ddl.value).primary_key
+        }
+        _ => return None,
     };
     let snapshot = match &tab.data {
         RelationLoad::Ready(snapshot) => Some(snapshot),
@@ -31,27 +65,26 @@ pub fn activity_pending_sql(tab: &RelationTab) -> String {
         | RelationLoad::Cancelled { previous } => previous.as_ref(),
         RelationLoad::Empty => None,
     };
-    snapshot
-        .and_then(|snapshot| snapshot.value.result.result_sets.last())
-        .map(|result| {
-            let columns = result
-                .columns
-                .iter()
-                .map(|column| column.name.clone())
-                .collect::<Vec<_>>();
-            let primary_key_columns = match &tab.ddl {
-                RelationLoad::Ready(ddl) => {
-                    crate::db::mutation::metadata_fingerprint(&ddl.value).primary_key
-                }
-                _ => Vec::new(),
-            };
-            preview_sql(edit, tab.title(), &columns, &primary_key_columns)
-        })
-        .unwrap_or_default()
+    let result = snapshot.and_then(|snapshot| snapshot.value.result.result_sets.last())?;
+    let columns = result
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    Some(preview_sql(
+        edit,
+        tab.title(),
+        &columns,
+        &primary_key_columns,
+    ))
 }
 
 /// Builds a safe, read-only review representation from the local edit session.
 /// Execution still goes through the typed mutation requests in `App::relation_save`.
+///
+/// When `primary_key_columns` is empty after DDL is loaded (true keyless table),
+/// WHERE falls back to all columns for preview only. Do not pass an empty PK list
+/// merely because DDL has not been loaded yet — use [`preview_sql_for_tab`] instead.
 pub fn preview_sql(
     session: &RelationEditSession,
     relation: &str,
@@ -284,5 +317,24 @@ mod tests {
         session.update_cell(0, 1, CellValue::Text("new".into()));
         session.insert_row(1, vec![CellValue::Null, CellValue::Null]);
         assert_eq!(super::summary(&session), (1, 1, 0, 3));
+    }
+
+    #[test]
+    fn activity_pending_waits_when_ddl_is_missing() {
+        use crate::model::relation::{RelationLoad, RelationTab};
+
+        let mut tab = RelationTab::new("public.users");
+        let mut edit = RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("ada".into()),
+        ]]);
+        assert!(edit.rows[0].update_cell(1, CellValue::Text("bob".into())));
+        tab.edit = Some(edit);
+        tab.ddl = RelationLoad::Empty;
+        assert_eq!(
+            super::activity_pending_sql(&tab),
+            super::PENDING_LOADING_PRIMARY_KEY
+        );
+        assert!(super::preview_sql_for_tab(&tab).is_none());
     }
 }

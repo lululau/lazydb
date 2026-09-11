@@ -4735,6 +4735,8 @@ fn sql_activity_pending_placeholder(open_txn: bool, pending: &str) -> Option<&'s
         Some(crate::model::sql_activity::EMPTY_NO_OPEN_TXN)
     } else if pending.trim().is_empty() {
         Some(crate::model::sql_activity::EMPTY_OPEN_TXN_NO_STMTS)
+    } else if pending.trim() == crate::model::relation_review::PENDING_LOADING_PRIMARY_KEY.trim() {
+        Some(crate::model::relation_review::PENDING_LOADING_PRIMARY_KEY)
     } else {
         None
     }

@@ -86,6 +86,14 @@ use crate::{
 };
 
 const RELATION_METADATA_SAVE_MESSAGE: &str = "Loading relation metadata before saving";
+const RELATION_METADATA_REVIEW_MESSAGE: &str = "Loading relation metadata before review";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RelationDdlFollowUp {
+    ContinueSave,
+    OpenReview { intent: DeferredIntent },
+    RefreshReviewOnly,
+}
 
 fn pending_relation_request<T>(load: &RelationLoad<T>) -> Option<RelationRequest> {
     match load {
@@ -11073,7 +11081,7 @@ impl App {
     fn open_relation_transaction_control(
         &mut self,
         tab_id: Uuid,
-        _intent: DeferredIntent,
+        intent: DeferredIntent,
     ) -> Vec<Command> {
         let Some(WorkspaceTab::Relation(tab)) = self.tabs.iter().find(|tab| tab.id() == tab_id)
         else {
@@ -11090,46 +11098,31 @@ impl App {
         if tab.transaction_state == TransactionState::Idle && !has_dirty_rows {
             return Vec::new();
         }
-        let sql = if tab.transaction_state == TransactionState::Idle {
-            let snapshot = match &tab.data {
-                RelationLoad::Ready(snapshot) => Some(snapshot),
-                RelationLoad::Loading { previous, .. }
-                | RelationLoad::Failed { previous, .. }
-                | RelationLoad::Cancelled { previous } => previous.as_ref(),
-                RelationLoad::Empty => None,
+        if tab.transaction_state == TransactionState::Idle
+            && has_dirty_rows
+            && !matches!(tab.ddl, RelationLoad::Ready(_))
+        {
+            let connection = match self.connection.active_identity() {
+                Some(connection) => connection,
+                None => return Vec::new(),
             };
-            snapshot
-                .and_then(|snapshot| snapshot.value.result.result_sets.last())
-                .zip(tab.edit.as_ref())
-                .map(|(result, edit)| {
-                    let columns = result
-                        .columns
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect::<Vec<_>>();
-                    let primary_key_columns = match &tab.ddl {
-                        RelationLoad::Ready(ddl) => {
-                            crate::db::mutation::metadata_fingerprint(&ddl.value).primary_key
-                        }
-                        _ => Vec::new(),
-                    };
-                    crate::model::relation_review::preview_sql(
-                        edit,
-                        tab.title(),
-                        &columns,
-                        &primary_key_columns,
-                    )
-                })
-                .unwrap_or_default()
+            return self.ensure_relation_ddl_loaded(
+                tab_id,
+                connection,
+                RelationDdlFollowUp::OpenReview { intent },
+            );
+        }
+        let sql = if tab.transaction_state == TransactionState::Idle {
+            crate::model::relation_review::preview_sql_for_tab(tab).unwrap_or_default()
         } else {
             tab.transaction_review_sql.clone().unwrap_or_default()
         };
         self.overlay = Some(Overlay::RelationTransactionConfirm {
             tab_id,
-            prompt: (_intent != DeferredIntent::Stay).then_some(DeferredTransactionPrompt {
+            prompt: (intent != DeferredIntent::Stay).then_some(DeferredTransactionPrompt {
                 target: DeferredTransactionTarget::Relation(tab_id),
                 transaction_generation: tab.transaction_generation,
-                intent: _intent,
+                intent,
             }),
             choice: TransactionExitChoice::Cancel,
             sql,
@@ -11162,27 +11155,48 @@ impl App {
             self.notify_warning("SQL Activity", "Open a SQL console or relation tab first");
             return Vec::new();
         };
+        let mut commands = Vec::new();
         match tab {
             WorkspaceTab::Sql(_) | WorkspaceTab::Relation(_) => {
+                let tab_id = tab.id();
                 let batch_count = match tab {
                     WorkspaceTab::Sql(tab) => tab.committed_sql_batches.len(),
                     WorkspaceTab::Relation(tab) => tab.committed_sql_batches.len(),
                     WorkspaceTab::Dashboard(_) => 0,
                 };
+                let needs_ddl = matches!(
+                    tab,
+                    WorkspaceTab::Relation(tab)
+                        if tab.edit.as_ref().is_some_and(|edit| {
+                            edit.rows.iter().any(|row| {
+                                !matches!(
+                                    row.state,
+                                    crate::model::relation_edit::EditableRowState::Clean
+                                )
+                            })
+                        }) && !matches!(tab.ddl, RelationLoad::Ready(_))
+                );
                 self.overlay = Some(Overlay::SqlActivity(SqlActivityState {
-                    tab_id: tab.id(),
+                    tab_id,
                     section: SqlActivitySection::Pending,
                     pending_scroll: 0,
                     committed_cursor: 0,
                     expanded: (0..batch_count).collect(),
                     status_hint: None,
                 }));
+                if needs_ddl && let Some(connection) = self.connection.active_identity() {
+                    commands = self.ensure_relation_ddl_loaded(
+                        tab_id,
+                        connection,
+                        RelationDdlFollowUp::RefreshReviewOnly,
+                    );
+                }
             }
             WorkspaceTab::Dashboard(_) => {
                 self.notify_warning("SQL Activity", "Open a SQL console or relation tab first");
             }
         }
-        Vec::new()
+        commands
     }
 
     fn sql_activity_tab_present(&self, tab_id: Uuid) -> bool {
@@ -16819,30 +16833,83 @@ impl App {
     }
 
     fn load_relation_metadata_for_save(&mut self, connection: ConnectionIdentity) -> Vec<Command> {
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        self.ensure_relation_ddl_loaded(tab.id, connection, RelationDdlFollowUp::ContinueSave)
+    }
+
+    fn ensure_relation_ddl_loaded(
+        &mut self,
+        tab_id: Uuid,
+        connection: ConnectionIdentity,
+        follow_up: RelationDdlFollowUp,
+    ) -> Vec<Command> {
         let Some(profile) = self
             .profiles
             .iter()
             .find(|profile| profile.id == connection.profile_id)
+            .cloned()
         else {
             return Vec::new();
         };
-        let Some(WorkspaceTab::Relation(tab)) = self.tabs.get_mut(self.active_tab) else {
+        let ddl_ready = {
+            let Some(WorkspaceTab::Relation(tab)) =
+                self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+            else {
+                return Vec::new();
+            };
+            if tab.descriptor.key.profile_id != connection.profile_id {
+                self.notify_warning("Relation", "Relation belongs to a different connection");
+                return Vec::new();
+            }
+            if !relation_is_in_scope(tab, &profile.catalog_scope) {
+                self.notify_warning("Relation", "Relation is outside the active catalog scope");
+                return Vec::new();
+            }
+            if matches!(tab.ddl, RelationLoad::Ready(_)) {
+                crate::model::relation_review::refresh_transaction_review_sql(tab);
+                true
+            } else {
+                false
+            }
+        };
+        if ddl_ready {
+            return match follow_up {
+                RelationDdlFollowUp::ContinueSave => self.relation_save(),
+                RelationDdlFollowUp::OpenReview { intent } => {
+                    self.open_relation_transaction_control(tab_id, intent)
+                }
+                RelationDdlFollowUp::RefreshReviewOnly => Vec::new(),
+            };
+        }
+
+        let notify = match follow_up {
+            RelationDdlFollowUp::ContinueSave => RELATION_METADATA_SAVE_MESSAGE,
+            RelationDdlFollowUp::OpenReview { .. } | RelationDdlFollowUp::RefreshReviewOnly => {
+                RELATION_METADATA_REVIEW_MESSAGE
+            }
+        };
+        let Some(WorkspaceTab::Relation(tab)) = self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
+        else {
             return Vec::new();
         };
-        if tab.descriptor.key.profile_id != connection.profile_id {
-            self.notify_warning("Relation", "Relation belongs to a different connection");
-            return Vec::new();
-        }
-        if !relation_is_in_scope(tab, &profile.catalog_scope) {
-            self.notify_warning("Relation", "Relation is outside the active catalog scope");
-            return Vec::new();
-        }
         let Some(edit) = tab.edit.as_mut() else {
             return Vec::new();
         };
-        edit.save_after_metadata_load = true;
+        match follow_up {
+            RelationDdlFollowUp::ContinueSave => {
+                edit.save_after_metadata_load = true;
+                edit.open_review_after_metadata_load = false;
+            }
+            RelationDdlFollowUp::OpenReview { .. } => {
+                edit.open_review_after_metadata_load = true;
+                edit.save_after_metadata_load = false;
+            }
+            RelationDdlFollowUp::RefreshReviewOnly => {}
+        }
         if matches!(tab.ddl, RelationLoad::Loading { .. }) {
-            self.notify_info("Relation", RELATION_METADATA_SAVE_MESSAGE);
+            self.notify_info("Relation", notify);
             return Vec::new();
         }
         let request = RelationRequest {
@@ -16871,7 +16938,7 @@ impl App {
             request: request.clone(),
             previous,
         };
-        self.notify_info("Relation", RELATION_METADATA_SAVE_MESSAGE);
+        self.notify_info("Relation", notify);
         vec![Command::LoadRelationDdl(request)]
     }
 
@@ -17816,6 +17883,7 @@ impl App {
             return Vec::new();
         };
         let mut continue_save = false;
+        let mut open_review_after_ddl = false;
         let mut metadata_error = None;
         let mut sql_log: Option<(Duration, crate::logger::SqlLogOutcome, String)> = None;
         match (request.kind, result) {
@@ -17868,9 +17936,23 @@ impl App {
                     let _ = self
                         .editor
                         .set_read_only_text(tab.ddl_editor_id, &ddl_text, false);
+                    crate::model::relation_review::refresh_transaction_review_sql(tab);
+                    if let Some(Overlay::RelationTransactionConfirm {
+                        tab_id: open_tab_id,
+                        sql,
+                        ..
+                    }) = self.overlay.as_mut()
+                        && *open_tab_id == tab.id
+                    {
+                        *sql = tab.transaction_review_sql.clone().unwrap_or_default();
+                    }
                     if let Some(edit) = tab.edit.as_mut() {
                         continue_save = edit.save_after_metadata_load;
                         edit.save_after_metadata_load = false;
+                        if edit.open_review_after_metadata_load {
+                            edit.open_review_after_metadata_load = false;
+                            open_review_after_ddl = true;
+                        }
                     }
                 }
             }
@@ -17903,6 +17985,7 @@ impl App {
                 {
                     if let Some(edit) = tab.edit.as_mut() {
                         edit.save_after_metadata_load = false;
+                        edit.open_review_after_metadata_load = false;
                     }
                     metadata_error = Some(format!(
                         "Could not load relation metadata for saving: {message}"
@@ -17926,12 +18009,16 @@ impl App {
             });
         }
         let should_continue = continue_save && tab_index == self.active_tab;
+        let should_open_review = open_review_after_ddl && tab_index == self.active_tab;
+        let review_tab_id = tab.id;
         let _ = tab;
         if let Some(message) = metadata_error {
             self.notify_error("Relation", message);
         }
         if should_continue {
             self.relation_save()
+        } else if should_open_review {
+            self.open_relation_transaction_control(review_tab_id, DeferredIntent::Stay)
         } else {
             Vec::new()
         }
@@ -19761,8 +19848,50 @@ mod tests {
     }
 
     #[test]
-    fn sql_activity_relation_pending_shows_live_dirty_preview() {
+    fn sql_activity_relation_pending_waits_without_ddl() {
         let mut tab = RelationTab::new("public.users");
+        let mut edit = RelationEditSession::from_rows(vec![vec![
+            CellValue::Integer(1),
+            CellValue::Text("ada".into()),
+        ]]);
+        assert!(edit.rows[0].update_cell(1, CellValue::Text("bob".into())));
+        tab.edit = Some(edit);
+        tab.ddl = RelationLoad::Empty;
+        let pending = crate::model::relation_review::activity_pending_sql(&tab);
+        assert_eq!(
+            pending,
+            crate::model::relation_review::PENDING_LOADING_PRIMARY_KEY
+        );
+    }
+
+    #[test]
+    fn sql_activity_relation_pending_uses_primary_key_when_ddl_ready() {
+        let connection = ConnectionIdentity {
+            profile_id: Uuid::nil(),
+            generation: 1,
+        };
+        let relation_id = CatalogId::new(
+            connection.profile_id,
+            CatalogKind::Table,
+            ["items", "main", "items"],
+        );
+        let request = RelationRequest {
+            tab_id: Uuid::new_v4(),
+            tab_generation: 0,
+            request_id: 0,
+            connection,
+            relation: RelationKey {
+                profile_id: connection.profile_id,
+                object_id: relation_id.clone(),
+            },
+            kind: RelationRequestKind::Ddl,
+            scope: CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main")),
+            options: Default::default(),
+            page: crate::model::pagination::PageRequest::first(
+                crate::model::pagination::PageSize::default(),
+            ),
+        };
+        let mut tab = RelationTab::new("main.items");
         let mut edit = RelationEditSession::from_rows(vec![vec![
             CellValue::Integer(1),
             CellValue::Text("ada".into()),
@@ -19771,7 +19900,7 @@ mod tests {
         tab.edit = Some(edit);
         tab.data = RelationLoad::Ready(OwnedSnapshot {
             value: crate::db::RelationPreview {
-                sql: "SELECT * FROM users".into(),
+                sql: "SELECT * FROM main.items".into(),
                 result: QueryOutcome::from_result_set(
                     ResultSet {
                         columns: vec![
@@ -19799,20 +19928,30 @@ mod tests {
                 row_versions: None,
             },
             attribution: SnapshotAttribution {
-                connection: ConnectionIdentity {
-                    profile_id: Uuid::nil(),
-                    generation: 1,
-                },
-                profile_id: Uuid::nil(),
-                scope: CatalogScope::for_profile(DatabaseKind::Sqlite, "", None),
+                connection,
+                profile_id: connection.profile_id,
+                scope: request.scope.clone(),
+            },
+        });
+        tab.ddl = RelationLoad::Ready(OwnedSnapshot {
+            value: test_relation_ddl(request, relation_id),
+            attribution: SnapshotAttribution {
+                connection,
+                profile_id: connection.profile_id,
+                scope: CatalogScope::for_profile(DatabaseKind::Postgres, "items", Some("main")),
             },
         });
         let pending = crate::model::relation_review::activity_pending_sql(&tab);
         assert!(
-            pending.contains("UPDATE") && pending.contains("bob"),
+            pending.contains("UPDATE")
+                && pending.contains("bob")
+                && pending.contains("WHERE \"id\" = 1"),
             "pending={pending}"
         );
-        assert!(tab.transaction_review_sql.is_none());
+        assert!(
+            !pending.contains("AND \"name\""),
+            "pending should not use all-column WHERE: {pending}"
+        );
     }
 
     #[test]

@@ -149,6 +149,8 @@ pub struct RelationEditSession {
     pub pending_mutation_history: Option<PendingMutationHistory>,
     pub pending_save: VecDeque<RelationMutationRequest>,
     pub save_after_metadata_load: bool,
+    /// After DDL metadata loads, open TRANSACTION REVIEW for this relation.
+    pub open_review_after_metadata_load: bool,
 }
 
 impl RelationEditSession {
@@ -318,6 +320,7 @@ impl RelationEditSession {
         self.redo.clear();
         self.pending_save.clear();
         self.save_after_metadata_load = false;
+        self.open_review_after_metadata_load = false;
         self.sync_history_depth();
     }
 
@@ -331,6 +334,7 @@ impl RelationEditSession {
         }
         self.pending_save.clear();
         self.save_after_metadata_load = false;
+        self.open_review_after_metadata_load = false;
         self.undo.clear();
         self.redo.clear();
         self.sync_history_depth();
