@@ -52,41 +52,11 @@ git commit -m "feat(logger): add core SqlLogger with formatting and path resolut
 **Files:**
 - Modify: `src/app.rs`
 
-- [ ] **Step 1: Write a test verifying `App` initializes `SqlLogger` and routes executed query events**
-
-Add unit test in `src/app.rs` or `tests/app_flow.rs` testing `finish_query` logging.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test --lib app::tests` (or targeted test)
-Expected: Test fails.
-
-- [ ] **Step 3: Implement logger integration in `src/app.rs`**
-
-1. Add `pub sql_logger: crate::logger::SqlLogger` field to `App`.
-2. In `App::new`, initialize `SqlLogger`:
-   ```rust
-   let (sql_logger, log_path) = match crate::logger::SqlLogger::init(None) {
-       Ok((logger, path)) => (logger, Some(path)),
-       Err(error) => {
-           // Post warning notification to notifications
-           (crate::logger::SqlLogger::noop(), None)
-       }
-   };
-   ```
-3. In `App::finish_query(...)`:
-   Construct `SqlLogRecord` from `last.draft` (or connection/target), duration, outcome, and raw SQL, then call `self.sql_logger.log(...)`.
-4. In `Action::ManualQueryFinished` & `Action::ManualQueryFailed`:
-   Call `self.sql_logger.log(...)` with success / error outcome.
-5. In `Action::ExecuteCatalogMutation` & `Action::ExecuteCatalogDrop`:
-   When mutation SQL statements execute, log the executed DDL statements.
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cargo test --lib app`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write a test verifying `App` initializes `SqlLogger` and routes executed query events**
+- [x] **Step 2: Run test to verify it fails**
+- [x] **Step 3: Implement logger integration in `src/app.rs`**
+- [x] **Step 4: Run tests to verify they pass**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/app.rs
