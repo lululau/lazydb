@@ -401,10 +401,10 @@ mod tests {
         let start = tokio::time::Instant::now();
         let timeout = std::time::Duration::from_millis(1500);
         while start.elapsed() < timeout {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if content.contains(expected_substring) {
-                    return content;
-                }
+            if let Ok(content) = std::fs::read_to_string(path)
+                && content.contains(expected_substring)
+            {
+                return content;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

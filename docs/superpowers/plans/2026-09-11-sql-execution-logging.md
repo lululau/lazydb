@@ -106,16 +106,16 @@ git commit -m "test: add integration tests for SQL execution logging"
 **Files:**
 - Modify: `docs/configuration.md`
 
-- [ ] **Step 1: Update documentation**
+- [x] **Step 1: Update documentation**
 
 Document `LAZYDB_LOG_DIR` environment variable, default path `$HOME/logs/lazydb/sql/`, file naming rules, and session logging behavior in `docs/configuration.md`.
 
-- [ ] **Step 2: Format and run full linter/test check**
+- [x] **Step 2: Format and run full linter/test check**
 
 Run: `cargo fmt --all && cargo clippy --all-targets && cargo test`
 Expected: PASS with 0 warnings or errors.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/configuration.md

@@ -65,6 +65,68 @@ installation data from `~/.local/share/lazydb/` into the selected config
 directory when the destination entries do not already exist. This includes
 `install.json`, `current`, and `releases/` for native installations.
 
+## SQL Execution Logging
+
+Every LazyDB process runs as an independent session and automatically logs
+executed business SQL statements to disk for auditing, debugging, and session
+history.
+
+### Log Directory and File Naming
+
+Set the `LAZYDB_LOG_DIR` environment variable to configure the base log directory:
+
+```bash
+export LAZYDB_LOG_DIR=$HOME/logs/lazydb
+```
+
+When `LAZYDB_LOG_DIR` is unset or empty, it defaults to:
+- macOS / Linux: `$HOME/logs/lazydb`
+- Windows: `%USERPROFILE%\logs\lazydb`
+
+SQL session logs are written into the `sql/` subdirectory under the base log
+directory (`<LAZYDB_LOG_DIR>/sql/`). This directory is created automatically if
+it does not already exist.
+
+Each LazyDB process writes to its own session log file using the naming pattern:
+
+```text
+lazydb_${TIME}_${HOSTNAME}_${PID}.log
+```
+
+- `${TIME}`: Local startup timestamp formatted as `YYYYMMDD_HHMMSS` in the local machine timezone (for example, `20260911_094500`).
+- `${HOSTNAME}`: Sanitized local machine hostname.
+- `${PID}`: Operating system process ID (`std::process::id()`).
+
+### Execution Scope
+
+SQL logging records user-submitted and agent-executed business SQL operations:
+
+- **Interactive SQL Editor**: Console queries, full buffer executions, and manual transaction commands (`commit;`, `rollback;`, etc.).
+- **Catalog DDL Mutations**: User-initiated catalog modifications such as table drops, column alterations, and table creations.
+- **Agent and MCP Invocations**: SQL queries and scripts executed via Agent CLI (`lazydb agent query`, `lazydb agent execute`) and MCP tool calls (`query`, `execute`).
+
+Internal background queries, including schema introspection, catalog discovery, connection health checks, and dashboard process list polling, are excluded from execution logs.
+
+### Log Format
+
+Each executed statement is recorded with an informative single-line header followed by the exact, unmutated SQL body:
+
+```text
+[<Timestamp>] [<Connection>/<Target>] [<Status>]
+<Raw SQL Body>
+
+```
+
+- **Timestamp**: Formatted in the local machine timezone with millisecond precision and explicit UTC offset: `YYYY-MM-DD HH:MM:SS.mmm ±HH:MM` (for example, `2026-09-11 09:45:00.123 +08:00`).
+- **Connection and Target**: The active connection profile name and optional schema/catalog target (e.g. `local-postgres/public` or `analytics`).
+- **Status and Metrics**: Outcome summary including execution duration in milliseconds:
+  - Successful query: `OK 15ms 120 rows`
+  - Successful mutation / DML: `OK 8ms 1 row(s) affected`
+  - Execution failure: `ERROR 3ms: relation "orders" does not exist`
+- **SQL Body**: Preserves original indentation, formatting, and multiline layout.
+- **Buffering & Persistence**: Entries are written via a line-buffered writer and immediately flushed to disk upon completion, ensuring durability across unexpected process exits.
+- **Fail-Safe Operation**: SQL logging operates asynchronously off the main TUI and database worker threads. If the destination directory is not writable or log file creation fails, LazyDB emits a non-fatal warning notification and cleanly disables logging without interrupting query execution or core application features.
+
 ## Command-Line Options
 
 These options are global and can be placed before a subcommand. They are not
