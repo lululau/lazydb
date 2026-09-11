@@ -72,7 +72,10 @@ mod tests {
             SqlRisk::TransactionControl
         ]));
         assert!(should_record_pending_sql(&[SqlRisk::Dml]));
-        assert!(should_record_pending_sql(&[SqlRisk::ReadOnly, SqlRisk::Dml]));
+        assert!(should_record_pending_sql(&[
+            SqlRisk::ReadOnly,
+            SqlRisk::Dml
+        ]));
         assert!(should_record_pending_sql(&[SqlRisk::Unknown]));
     }
 
@@ -81,10 +84,7 @@ mod tests {
         let mut pending = String::new();
         append_pending_sql(&mut pending, "UPDATE t SET a=1;");
         append_pending_sql(&mut pending, "DELETE FROM t WHERE id=1;");
-        assert_eq!(
-            pending,
-            "UPDATE t SET a=1;\n\nDELETE FROM t WHERE id=1;"
-        );
+        assert_eq!(pending, "UPDATE t SET a=1;\n\nDELETE FROM t WHERE id=1;");
         assert_eq!(statement_count_in_pending(&pending), 2);
     }
 

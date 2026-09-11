@@ -210,7 +210,8 @@ pub struct ConsoleTab {
     pub query: DataQueryState,
     pub derived: Option<DerivedResultState>,
     pub pending_transaction_sql: String,
-    pub committed_sql_batches: std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>,
+    pub committed_sql_batches:
+        std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

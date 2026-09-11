@@ -185,7 +185,8 @@ pub struct RelationTab {
     pub transaction_snapshot: Option<RelationEditSession>,
     pub transaction_review_sql: Option<String>,
     pub stale_native_identity: bool,
-    pub committed_sql_batches: std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>,
+    pub committed_sql_batches:
+        std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>,
 }
 
 impl RelationTab {
