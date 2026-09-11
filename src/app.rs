@@ -9707,6 +9707,7 @@ impl App {
                         .and_then(|tab| tab.last_execution.as_ref())
                         .map(|last| last.draft.catalog_change_impact.clone());
                     self.finish_query(tab_id, query_generation, outcome, true);
+                    self.record_console_pending_from_last_execution(tab_id);
                     if let Some(impact) = impact
                         && let Some(tab) = self
                             .tabs
@@ -9919,6 +9920,7 @@ impl App {
                     connection,
                     TransactionState::Active,
                 ) {
+                    self.clear_console_pending_sql(tab_id);
                     let tab = self
                         .tabs
                         .iter_mut()
@@ -9969,6 +9971,7 @@ impl App {
                     TransactionState::Committing,
                 ) {
                     let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    self.archive_console_committed_batch(tab_id, elapsed);
                     let connection_name = self.connection_name_for(&connection);
                     let tab = self
                         .tabs
@@ -10098,6 +10101,7 @@ impl App {
                     TransactionState::RollingBack,
                 ) {
                     let elapsed = self.take_transaction_op_elapsed(tab_id, Instant::now());
+                    self.clear_console_pending_sql(tab_id);
                     let connection_name = self.connection_name_for(&connection);
                     let tab = self
                         .tabs
@@ -11205,6 +11209,7 @@ impl App {
             {
                 tab.transaction_state = TransactionState::Idle;
                 tab.transaction_generation = tab.transaction_generation.saturating_add(1);
+                crate::model::sql_activity::clear_pending_sql(&mut tab.pending_transaction_sql);
                 append_console_output_to_editor(
                     &mut self.editor,
                     tab,
@@ -17655,6 +17660,69 @@ impl App {
                 })
     }
 
+    fn record_console_pending_from_last_execution(&mut self, tab_id: Uuid) {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == tab_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        else {
+            return;
+        };
+        if tab.transaction_state != TransactionState::Active {
+            return;
+        }
+        let Some((should_record, sql)) = tab.last_execution.as_ref().map(|last| {
+            (
+                crate::model::sql_activity::should_record_pending_sql(&last.draft.risks),
+                last.draft.sql.clone(),
+            )
+        }) else {
+            return;
+        };
+        if !should_record {
+            return;
+        }
+        crate::model::sql_activity::append_pending_sql(&mut tab.pending_transaction_sql, &sql);
+    }
+
+    fn clear_console_pending_sql(&mut self, tab_id: Uuid) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == tab_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        {
+            crate::model::sql_activity::clear_pending_sql(&mut tab.pending_transaction_sql);
+        }
+    }
+
+    fn archive_console_committed_batch(&mut self, tab_id: Uuid, elapsed: Option<Duration>) {
+        let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.id() == tab_id)
+            .and_then(WorkspaceTab::as_console_mut)
+        else {
+            return;
+        };
+        if tab.pending_transaction_sql.trim().is_empty() {
+            crate::model::sql_activity::clear_pending_sql(&mut tab.pending_transaction_sql);
+            return;
+        }
+        let sql = std::mem::take(&mut tab.pending_transaction_sql);
+        let statement_count = crate::model::sql_activity::statement_count_in_pending(&sql);
+        crate::model::sql_activity::push_committed_batch(
+            &mut tab.committed_sql_batches,
+            crate::model::sql_activity::CommittedSqlBatch {
+                timestamp: chrono::Local::now(),
+                sql,
+                statement_count,
+                elapsed,
+            },
+        );
+    }
+
     fn finish_query(
         &mut self,
         tab_id: Uuid,
@@ -17872,6 +17940,9 @@ fn tab_snapshot(tab: &ConsoleTab) -> transaction::TransactionSnapshot {
 }
 
 fn apply_transaction_snapshot(tab: &mut ConsoleTab, snapshot: transaction::TransactionSnapshot) {
+    if snapshot.state == TransactionState::Idle {
+        crate::model::sql_activity::clear_pending_sql(&mut tab.pending_transaction_sql);
+    }
     tab.transaction_mode = snapshot.mode;
     tab.transaction_state = snapshot.state;
     tab.transaction_generation = snapshot.generation;
@@ -18987,6 +19058,167 @@ mod tests {
             command => panic!("unexpected command: {command:?}"),
         };
         (app, tab_id, generation)
+    }
+
+    #[test]
+    fn manual_mutation_appends_to_pending_transaction_sql() {
+        let (mut app, tab_id, generation) = connected_query_app("UPDATE users SET name = 'ada'");
+        let connection = app.connection.active_identity().unwrap();
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        let transaction_generation = tab.transaction_generation;
+
+        app.update(Action::ManualQueryFinished {
+            tab_id,
+            query_generation: generation,
+            transaction_generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+
+        let pending = &app.active_console().pending_transaction_sql;
+        assert!(pending.contains("UPDATE users SET name = 'ada'"));
+    }
+
+    #[test]
+    fn manual_readonly_does_not_append_pending_sql() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT 1");
+        let connection = app.connection.active_identity().unwrap();
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        let transaction_generation = tab.transaction_generation;
+
+        app.update(Action::ManualQueryFinished {
+            tab_id,
+            query_generation: generation,
+            transaction_generation,
+            connection,
+            outcome: empty_outcome(),
+        });
+
+        assert!(app.active_console().pending_transaction_sql.is_empty());
+    }
+
+    #[test]
+    fn manual_committed_archives_pending_into_committed_batches() {
+        let (mut app, _, _) = connected_query_app("SELECT 1");
+        let connection = app.connection.active_identity().unwrap();
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        tab.pending_transaction_sql = "UPDATE users SET name = 'ada'".into();
+
+        let commands = app.update(Action::CommitTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualCommit {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualCommitted {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+        });
+
+        let tab = app.active_console();
+        assert_eq!(tab.transaction_state, TransactionState::Idle);
+        assert!(tab.pending_transaction_sql.is_empty());
+        let batch = tab
+            .committed_sql_batches
+            .front()
+            .expect("committed batch archived");
+        assert!(batch.sql.contains("UPDATE users SET name = 'ada'"));
+        assert_eq!(batch.statement_count, 1);
+    }
+
+    #[test]
+    fn manual_rolled_back_clears_pending_without_archiving() {
+        let (mut app, _, _) = connected_query_app("SELECT 1");
+        let connection = app.connection.active_identity().unwrap();
+        let existing = crate::model::sql_activity::CommittedSqlBatch {
+            timestamp: chrono::Local::now(),
+            sql: "INSERT INTO t VALUES (1)".into(),
+            statement_count: 1,
+            elapsed: None,
+        };
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        tab.pending_transaction_sql = "UPDATE users SET name = 'ada'".into();
+        tab.committed_sql_batches.push_front(existing);
+
+        let commands = app.update(Action::RollbackTransaction);
+        let (tab_id, query_generation, transaction_generation) = match commands.as_slice() {
+            [
+                Command::ManualRollback {
+                    tab_id,
+                    query_generation,
+                    transaction_generation,
+                    ..
+                },
+            ] => (*tab_id, *query_generation, *transaction_generation),
+            commands => panic!("unexpected commands: {commands:?}"),
+        };
+
+        app.update(Action::ManualRolledBack {
+            tab_id,
+            query_generation,
+            transaction_generation,
+            connection,
+        });
+
+        let tab = app.active_console();
+        assert_eq!(tab.transaction_state, TransactionState::Idle);
+        assert!(tab.pending_transaction_sql.is_empty());
+        assert_eq!(tab.committed_sql_batches.len(), 1);
+        assert_eq!(
+            tab.committed_sql_batches.front().unwrap().sql,
+            "INSERT INTO t VALUES (1)"
+        );
+    }
+
+    #[test]
+    fn manual_implicitly_ended_clears_pending_without_archiving() {
+        let (mut app, tab_id, generation) = connected_query_app("SELECT 1");
+        let connection = app.connection.active_identity().unwrap();
+        let existing = crate::model::sql_activity::CommittedSqlBatch {
+            timestamp: chrono::Local::now(),
+            sql: "INSERT INTO t VALUES (1)".into(),
+            statement_count: 1,
+            elapsed: None,
+        };
+        let tab = app.active_console_mut();
+        tab.transaction_mode = TransactionMode::Manual;
+        tab.transaction_state = TransactionState::Active;
+        tab.pending_transaction_sql = "UPDATE users SET name = 'ada'".into();
+        tab.committed_sql_batches.push_front(existing);
+        let transaction_generation = tab.transaction_generation;
+
+        app.update(Action::ManualImplicitlyEnded {
+            tab_id,
+            query_generation: generation,
+            transaction_generation,
+            connection,
+        });
+
+        let tab = app.active_console();
+        assert_eq!(tab.transaction_state, TransactionState::Idle);
+        assert!(tab.pending_transaction_sql.is_empty());
+        assert_eq!(tab.committed_sql_batches.len(), 1);
+        assert_eq!(
+            tab.committed_sql_batches.front().unwrap().sql,
+            "INSERT INTO t VALUES (1)"
+        );
     }
 
     #[test]
