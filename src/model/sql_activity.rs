@@ -106,4 +106,14 @@ mod tests {
         assert_eq!(batches.front().unwrap().sql, "stmt 54");
         assert_eq!(batches.back().unwrap().sql, "stmt 5");
     }
+
+    #[test]
+    fn console_and_relation_tabs_start_with_empty_activity_state() {
+        let console = crate::model::tab::ConsoleTab::new("SQL 1");
+        assert!(console.pending_transaction_sql.is_empty());
+        assert!(console.committed_sql_batches.is_empty());
+
+        let relation = crate::model::relation::RelationTab::new("public.users");
+        assert!(relation.committed_sql_batches.is_empty());
+    }
 }
