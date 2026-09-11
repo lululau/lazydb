@@ -67,7 +67,7 @@ use crate::{
         tab::{DataGridViewport, ResultView, WorkspaceTab},
         workspace::{
             ConnectionStatus, ExplorerSearchPhase, Focus, Overlay, PaneLayoutMetrics, PaneSplit,
-            QueryStatus, VisibleCatalogNode,
+            QueryStatus, SqlActivitySection, SqlActivityState, VisibleCatalogNode,
         },
     },
     security::sanitize_terminal_text,
@@ -4528,17 +4528,464 @@ fn render_overlay(
         Overlay::ExplorerAdd(menu) => {
             render_explorer_add(frame, area, app, menu, state, theme, icons)
         }
-        Overlay::SqlActivity(_) => render_sql_activity_overlay_stub(frame, area),
+        Overlay::SqlActivity(activity) => {
+            render_sql_activity_overlay(frame, area, app, activity, theme)
+        }
     }
 }
 
-fn render_sql_activity_overlay_stub(frame: &mut Frame<'_>, area: Rect) {
+fn render_sql_activity_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    activity: &SqlActivityState,
+    theme: Theme,
+) {
+    use crate::model::sql_activity::statement_count_in_pending;
+
     let popup = centered(
         area,
-        72.min(area.width.saturating_sub(4)),
-        16.min(area.height),
+        area.width.saturating_sub(4).min(110),
+        24.min(area.height),
     );
-    frame.render_widget(Clear, popup);
+    let inner = dialog::render_frame(frame, popup, " SQL ACTIVITY ", theme);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let inner = inner.inner(ratatui::layout::Margin::new(
+        u16::from(inner.width > 6) * 2,
+        u16::from(inner.height >= 14),
+    ));
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let tab = app.tabs.iter().find(|tab| tab.id() == activity.tab_id);
+    let pending_text = tab.map(sql_activity_pending_text).unwrap_or("");
+    let open_txn = tab.is_some_and(sql_activity_txn_open);
+    let pending_placeholder = sql_activity_pending_placeholder(open_txn, pending_text);
+    let pending_count = if open_txn {
+        statement_count_in_pending(pending_text)
+    } else {
+        0
+    };
+    let batches = tab.and_then(sql_activity_committed_batches);
+    let committed_count = batches.map_or(0, std::collections::VecDeque::len);
+    let hint = activity
+        .status_hint
+        .as_deref()
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty());
+    let hint_height = u16::from(hint.is_some());
+    let mut constraints = vec![
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Min(3),
+    ];
+    if hint_height > 0 {
+        constraints.push(Constraint::Length(hint_height));
+    }
+    constraints.push(Constraint::Length(1));
+    let sections = Layout::vertical(constraints).split(inner);
+    let pending_focused = activity.section == SqlActivitySection::Pending;
+    let muted = Style::new().fg(theme.muted).bg(theme.surface_raised);
+
+    let title = tab.map(WorkspaceTab::title).unwrap_or("unknown");
+    let context = tab.and_then(|tab| sql_activity_context_label(app, tab));
+    let header = match context.as_deref() {
+        Some(context) if !context.is_empty() => {
+            format!(
+                "{}  {}",
+                sanitize_terminal_text(title),
+                sanitize_terminal_text(context)
+            )
+        }
+        _ => sanitize_terminal_text(title),
+    };
+    let mut badge_spans = vec![
+        Span::styled(
+            format!("PENDING {pending_count}"),
+            if pending_focused {
+                Style::new()
+                    .fg(theme.accent)
+                    .bg(theme.surface_raised)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            },
+        ),
+        Span::styled("  ", muted),
+        Span::styled(
+            format!("COMMITTED {committed_count} batches"),
+            if pending_focused {
+                muted
+            } else {
+                Style::new()
+                    .fg(theme.accent)
+                    .bg(theme.surface_raised)
+                    .add_modifier(Modifier::BOLD)
+            },
+        ),
+    ];
+    if let Some((label, color)) = tab.and_then(|tab| sql_activity_txn_badge(tab, theme)) {
+        badge_spans.push(Span::styled("  ", muted));
+        badge_spans.push(Span::styled(
+            label,
+            Style::new().fg(color).bg(theme.surface_raised),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                truncate_to_cells(&header, inner.width as usize),
+                Style::new()
+                    .fg(theme.text)
+                    .bg(theme.surface_raised)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(badge_spans),
+        ])
+        .style(Style::new().bg(theme.surface_raised)),
+        sections[0],
+    );
+
+    render_sql_activity_pending(
+        frame,
+        sections[1],
+        pending_text,
+        pending_placeholder,
+        activity.pending_scroll,
+        pending_focused,
+        app.sql_dialect(),
+        theme,
+    );
+    render_sql_activity_committed(
+        frame,
+        sections[2],
+        batches,
+        activity.committed_cursor,
+        &activity.expanded,
+        !pending_focused,
+        app.sql_dialect(),
+        theme,
+    );
+    if let Some(hint) = hint {
+        frame.render_widget(
+            Paragraph::new(sanitize_terminal_text(hint))
+                .style(Style::new().fg(theme.warning).bg(theme.surface_raised))
+                .wrap(Wrap { trim: true }),
+            sections[sections.len() - 2],
+        );
+    }
+    dialog::render_hint(
+        frame,
+        sections[sections.len() - 1],
+        "Tab sections  j/k move  Enter review/expand  y yank  Esc",
+        theme,
+    );
+}
+
+fn sql_activity_pending_text(tab: &WorkspaceTab) -> &str {
+    match tab {
+        WorkspaceTab::Sql(tab) => tab.pending_transaction_sql.as_str(),
+        WorkspaceTab::Relation(tab) => tab.transaction_review_sql.as_deref().unwrap_or(""),
+        WorkspaceTab::Dashboard(_) => "",
+    }
+}
+
+fn sql_activity_committed_batches(
+    tab: &WorkspaceTab,
+) -> Option<&std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>> {
+    match tab {
+        WorkspaceTab::Sql(tab) => Some(&tab.committed_sql_batches),
+        WorkspaceTab::Relation(tab) => Some(&tab.committed_sql_batches),
+        WorkspaceTab::Dashboard(_) => None,
+    }
+}
+
+fn sql_activity_relation_dirty(tab: &crate::model::relation::RelationTab) -> bool {
+    tab.edit.as_ref().is_some_and(|edit| {
+        edit.rows.iter().any(|row| {
+            !matches!(
+                row.state,
+                crate::model::relation_edit::EditableRowState::Clean
+            )
+        })
+    })
+}
+
+fn sql_activity_txn_open(tab: &WorkspaceTab) -> bool {
+    use crate::model::transaction::{TransactionMode, TransactionState};
+
+    match tab {
+        WorkspaceTab::Sql(tab) => {
+            tab.transaction_mode == TransactionMode::Manual
+                && tab.transaction_state != TransactionState::Idle
+        }
+        WorkspaceTab::Relation(tab) => {
+            tab.transaction_state != TransactionState::Idle || sql_activity_relation_dirty(tab)
+        }
+        WorkspaceTab::Dashboard(_) => false,
+    }
+}
+
+fn sql_activity_pending_placeholder(open_txn: bool, pending: &str) -> Option<&'static str> {
+    if !open_txn {
+        Some(crate::model::sql_activity::EMPTY_NO_OPEN_TXN)
+    } else if pending.trim().is_empty() {
+        Some(crate::model::sql_activity::EMPTY_OPEN_TXN_NO_STMTS)
+    } else {
+        None
+    }
+}
+
+fn sql_activity_txn_badge(tab: &WorkspaceTab, theme: Theme) -> Option<(&'static str, Color)> {
+    use crate::model::transaction::TransactionState;
+
+    match tab {
+        WorkspaceTab::Sql(tab) => Some(transaction_state_display(
+            Some(tab.transaction_state),
+            theme,
+        )),
+        WorkspaceTab::Relation(tab) => {
+            if tab.transaction_state == TransactionState::Idle && sql_activity_relation_dirty(tab) {
+                Some(("LOCAL CHANGES", theme.warning))
+            } else {
+                Some(transaction_state_display(
+                    Some(tab.transaction_state),
+                    theme,
+                ))
+            }
+        }
+        WorkspaceTab::Dashboard(_) => None,
+    }
+}
+
+fn sql_activity_context_label(app: &App, tab: &WorkspaceTab) -> Option<String> {
+    match tab {
+        WorkspaceTab::Sql(tab) => tab.execution_target.as_ref().map(|target| {
+            let schema = target
+                .schema
+                .as_deref()
+                .map(|schema| format!(".{schema}"))
+                .unwrap_or_default();
+            match app
+                .profiles
+                .iter()
+                .find(|profile| profile.id == target.profile_id)
+            {
+                Some(profile) => format!("[{}] {}{schema}", profile.name, target.database),
+                None => format!("{}{schema}", target.database),
+            }
+        }),
+        WorkspaceTab::Relation(tab) => app
+            .profiles
+            .iter()
+            .find(|profile| profile.id == tab.descriptor.key.profile_id)
+            .map(|profile| profile.name.clone()),
+        WorkspaceTab::Dashboard(_) => None,
+    }
+}
+
+fn sql_activity_batch_header(batch: &crate::model::sql_activity::CommittedSqlBatch) -> String {
+    let mut header = format!(
+        "{}  {} stmt{}",
+        batch.timestamp.format("%H:%M:%S"),
+        batch.statement_count,
+        if batch.statement_count == 1 { "" } else { "s" },
+    );
+    if let Some(elapsed) = batch.elapsed {
+        header.push_str(&format!("  {}ms", elapsed.as_millis()));
+    }
+    header
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sql_activity_pending(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    pending_text: &str,
+    placeholder: Option<&str>,
+    scroll: u16,
+    focused: bool,
+    dialect: crate::sql::SqlDialect,
+    theme: Theme,
+) {
+    let block = panel_block(" PENDING ", focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if let Some(placeholder) = placeholder {
+        frame.render_widget(
+            Paragraph::new(placeholder)
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+    let preview = sql_preview::lines(
+        pending_text,
+        dialect,
+        inner.width.saturating_sub(4) as usize,
+        theme,
+    );
+    let lines = preview
+        .into_iter()
+        .skip(usize::from(scroll))
+        .take(inner.height as usize)
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::new().fg(theme.text).bg(theme.surface)),
+        inner,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_sql_activity_committed(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    batches: Option<&std::collections::VecDeque<crate::model::sql_activity::CommittedSqlBatch>>,
+    cursor: usize,
+    expanded: &std::collections::BTreeSet<usize>,
+    focused: bool,
+    dialect: crate::sql::SqlDialect,
+    theme: Theme,
+) {
+    use crate::model::sql_activity::EMPTY_NO_COMMITTED;
+
+    let block = panel_block(" COMMITTED ", focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let Some(batches) = batches.filter(|batches| !batches.is_empty()) else {
+        frame.render_widget(
+            Paragraph::new(EMPTY_NO_COMMITTED)
+                .style(Style::new().fg(theme.muted).bg(theme.surface))
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    };
+
+    let cursor = cursor.min(batches.len().saturating_sub(1));
+    let preview_width = inner.width.saturating_sub(4) as usize;
+    let sql_lines = batches
+        .iter()
+        .enumerate()
+        .map(|(index, batch)| {
+            expanded
+                .contains(&index)
+                .then(|| sql_preview::lines(&batch.sql, dialect, preview_width.max(1), theme))
+        })
+        .collect::<Vec<_>>();
+    let heights = sql_lines
+        .iter()
+        .map(|lines| 1 + lines.as_ref().map_or(0, Vec::len))
+        .collect::<Vec<_>>();
+    let visible_height = inner.height as usize;
+    let mut start = cursor;
+    let mut used = heights
+        .get(cursor)
+        .copied()
+        .unwrap_or(1)
+        .min(visible_height);
+    while start > 0 {
+        let next = heights[start - 1];
+        if used.saturating_add(next) > visible_height {
+            break;
+        }
+        used = used.saturating_add(next);
+        start -= 1;
+    }
+
+    let mut y = inner.y;
+    let bottom = inner.bottom();
+    for (index, batch) in batches.iter().enumerate().skip(start) {
+        if y >= bottom {
+            break;
+        }
+        let selected = index == cursor;
+        let header = format!(
+            "{} {}",
+            if selected { ">" } else { " " },
+            sql_activity_batch_header(batch)
+        );
+        let header_style = if selected && focused {
+            Style::new()
+                .fg(theme.text)
+                .bg(theme.selection)
+                .add_modifier(Modifier::BOLD)
+        } else if selected {
+            Style::new().fg(theme.text).bg(theme.selection)
+        } else if focused {
+            Style::new().fg(theme.text).bg(theme.surface)
+        } else {
+            Style::new().fg(theme.muted).bg(theme.surface)
+        };
+        frame.render_widget(
+            Paragraph::new(truncate_to_cells(&header, inner.width as usize)).style(header_style),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y = y.saturating_add(1);
+        if let Some(lines) = sql_lines.get(index).and_then(|lines| lines.as_ref()) {
+            let remaining = usize::from(bottom.saturating_sub(y));
+            for line in lines.iter().take(remaining) {
+                frame.render_widget(
+                    Paragraph::new(line.clone())
+                        .style(Style::new().fg(theme.text).bg(theme.surface)),
+                    Rect::new(inner.x, y, inner.width, 1),
+                );
+                y = y.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sql_activity_overlay_tests {
+    use super::{sql_activity_batch_header, sql_activity_pending_placeholder};
+    use crate::model::sql_activity::{
+        CommittedSqlBatch, EMPTY_NO_OPEN_TXN, EMPTY_OPEN_TXN_NO_STMTS,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn pending_placeholder_uses_spec_empty_copy() {
+        assert_eq!(
+            sql_activity_pending_placeholder(false, "UPDATE t SET a=1;"),
+            Some(EMPTY_NO_OPEN_TXN)
+        );
+        assert_eq!(
+            sql_activity_pending_placeholder(true, ""),
+            Some(EMPTY_OPEN_TXN_NO_STMTS)
+        );
+        assert_eq!(
+            sql_activity_pending_placeholder(true, "   \n"),
+            Some(EMPTY_OPEN_TXN_NO_STMTS)
+        );
+        assert_eq!(
+            sql_activity_pending_placeholder(true, "UPDATE t SET a=1;"),
+            None
+        );
+    }
+
+    #[test]
+    fn committed_header_includes_count_and_elapsed() {
+        let batch = CommittedSqlBatch {
+            timestamp: chrono::Local::now(),
+            sql: "UPDATE t SET a=1;".into(),
+            statement_count: 3,
+            elapsed: Some(Duration::from_millis(24)),
+        };
+        let header = sql_activity_batch_header(&batch);
+        assert!(header.contains("3 stmts"), "{header}");
+        assert!(header.contains("24ms"), "{header}");
+    }
 }
 
 fn render_transaction_menu(
