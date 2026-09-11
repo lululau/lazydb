@@ -72,28 +72,11 @@ git commit -m "feat(app): hook SqlLogger into query execution and transaction co
 - Modify: `src/agent/cli.rs`
 - Modify: `src/agent/mcp.rs`
 
-- [ ] **Step 1: Write a test verifying `AgentService` logs executed queries**
-
-Add unit test in `src/agent/service.rs` verifying query execution emits to `SqlLogger`.
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cargo test --lib agent::service::tests`
-Expected: FAIL
-
-- [ ] **Step 3: Implement logger in `AgentService`**
-
-1. Add `sql_logger: crate::logger::SqlLogger` to `AgentService`.
-2. In `AgentService::query(...)`, after successful or failed query execution, emit `SqlLogRecord`.
-3. In `AgentService::execute(...)`, after mutation execution, emit `SqlLogRecord`.
-4. Wire `SqlLogger` initialization when constructing `AgentService` in `src/agent/cli.rs` and `src/agent/mcp.rs`.
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cargo test --lib agent::service::tests`
-Expected: PASS
-
-- [ ] **Step 5: Commit**
+- [x] **Step 1: Write a test verifying `AgentService` logs executed queries**
+- [x] **Step 2: Run test to verify it fails**
+- [x] **Step 3: Implement logger in `AgentService`**
+- [x] **Step 4: Run tests to verify they pass**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/agent/service.rs src/agent/cli.rs src/agent/mcp.rs
