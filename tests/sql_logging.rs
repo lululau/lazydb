@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Mutex, time::Duration};
+use std::{ffi::OsString, path::Path, sync::Mutex, time::Duration};
 
 use lazydb::{
     action::{Action, Command},
@@ -32,7 +32,9 @@ where
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    last_content
+    panic!(
+        "timed out after {timeout:?} waiting for log content matching predicate on {log_path:?}. Last content:\n{last_content}"
+    );
 }
 
 // 1. Integration Test 1: File creation & naming convention
@@ -121,7 +123,8 @@ async fn sequential_query_logging_and_line_buffered_immediate_flushing() {
     logger.log(record3);
     logger.log(record4);
 
-    let final_content = wait_for_log_content(&log_path, |c| c.contains("commit;")).await;
+    let final_content =
+        wait_for_log_content(&log_path, |c| c.contains("commit;") && c.ends_with("\n\n")).await;
 
     // Verify double newline separation between entries
     let entries: Vec<&str> = final_content.split("\n\n").collect();
@@ -192,6 +195,11 @@ async fn sequential_query_logging_and_line_buffered_immediate_flushing() {
             _ => unreachable!(),
         }
     }
+
+    assert!(
+        parsed_timestamps.windows(2).all(|w| w[0] <= w[1]),
+        "timestamps should be monotonic"
+    );
 
     // Verify all 4 entries appear in correct order
     let select_pos = final_content
@@ -304,15 +312,24 @@ async fn lazydb_log_dir_environment_variable_resolution() {
     let _lock = ENV_MUTEX.lock().unwrap();
     let temp_dir = tempdir().expect("failed to create temp dir");
 
-    struct EnvGuard(&'static str);
+    struct EnvGuard(&'static str, Option<OsString>);
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            Self(key, std::env::var_os(key))
+        }
+    }
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            unsafe { std::env::remove_var(self.0) };
+            if let Some(ref original) = self.1 {
+                unsafe { std::env::set_var(self.0, original) };
+            } else {
+                unsafe { std::env::remove_var(self.0) };
+            }
         }
     }
 
+    let _guard = EnvGuard::new("LAZYDB_LOG_DIR");
     unsafe { std::env::set_var("LAZYDB_LOG_DIR", temp_dir.path()) };
-    let _guard = EnvGuard("LAZYDB_LOG_DIR");
 
     let (_logger, log_path) = SqlLogger::init(None).expect("failed to init SqlLogger with None");
 
