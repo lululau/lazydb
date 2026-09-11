@@ -66,10 +66,10 @@ are already loaded:
 
 | Keys | Behavior |
 | --- | --- |
-| `PageUp` | Load the previous data page |
-| `PageDown` | Load the next data page |
-| `Ctrl-Home` | Load the first data page |
-| `Ctrl-End` | Load the last data page; this may run a total-count query |
+| `PageUp` / `[[` | Load the previous data page |
+| `PageDown` / `]]` | Load the next data page |
+| `Ctrl-Home` / `{{` | Load the first data page |
+| `Ctrl-End` / `}}` | Load the last data page; this may run a total-count query |
 | `P` | Open the page-size selector and return to the first page |
 
 These commands are active only when the SQL Result Set or Relation Data grid is

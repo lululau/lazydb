@@ -120,13 +120,15 @@ toggle = ["o"]
 
 [keybindings.results]
 # Ctrl-Home/Ctrl-End load the first/last database page.
-first-page = ["Ctrl-Home"]
+# {{ / }} are vim-style first/last page aliases.
+first-page = ["Ctrl-Home", "{ {"]
 # PageUp/PageDown load the previous/next database page.
-previous-page = ["PageUp"]
-next-page = ["PageDown"]
+# [[ / ]] are vim-style previous/next page aliases.
+previous-page = ["PageUp", "[ ["]
+next-page = ["PageDown", "] ]"]
 # P opens the page-size selector.
 page-size = ["P"]
-last-page = ["Ctrl-End"]
+last-page = ["Ctrl-End", "} }"]
 # h moves left through the result grid.
 move-left = ["h"]
 # j moves down through the result grid.

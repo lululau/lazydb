@@ -24,6 +24,8 @@ enum Pending {
     WindowCount { count: u32 },
     Previous,
     Next,
+    ResultsBraceOpen,
+    ResultsBraceClose,
     GridYank,
     SqlActivityYank,
     RelationDelete,
@@ -1492,6 +1494,14 @@ impl Keymap {
                 self.set_pending(Pending::Next, app);
                 return None;
             }
+            KeyCode::Char('{') if pagination_context_active(app) => {
+                self.set_pending(Pending::ResultsBraceOpen, app);
+                return None;
+            }
+            KeyCode::Char('}') if pagination_context_active(app) => {
+                self.set_pending(Pending::ResultsBraceClose, app);
+                return None;
+            }
             _ => {}
         }
 
@@ -1811,9 +1821,24 @@ fn map_configured_pagination(
     app: &App,
     bindings: &crate::config::KeyBindings,
 ) -> Option<Action> {
-    let action = |result: Action, relation_action: Action| {
-        if relation { relation_action } else { result }
-    };
+    pagination_actions(relation)
+        .into_iter()
+        .find_map(|(command, result, relation_action)| {
+            bindings.matches(command, event).then_some(if relation {
+                relation_action
+            } else {
+                result
+            })
+        })
+        .or_else(|| {
+            bindings
+                .matches("results-page-size", event)
+                .then_some(Action::OpenPageSizeSelector { relation })
+        })
+        .filter(|_| pagination_context_allows(app, relation))
+}
+
+fn pagination_actions(_relation: bool) -> [(&'static str, Action, Action); 4] {
     [
         (
             "results-first-page",
@@ -1836,33 +1861,46 @@ fn map_configured_pagination(
             Action::RelationLastPage,
         ),
     ]
-    .into_iter()
-    .find_map(|(command, result, relation_action)| {
-        bindings
-            .matches(command, event)
-            .then(|| action(result, relation_action))
-    })
-    .or_else(|| {
-        bindings
-            .matches("results-page-size", event)
-            .then_some(Action::OpenPageSizeSelector { relation })
-    })
-    .filter(|_| {
-        if relation {
-            matches!(
-                app.tabs.get(app.active_tab),
-                Some(crate::model::tab::WorkspaceTab::Relation(tab))
-                    if tab.view == crate::model::relation::RelationView::Data
-                        && tab.query.focus.is_none()
-            )
-        } else {
-            matches!(
-                app.tabs.get(app.active_tab),
-                Some(crate::model::tab::WorkspaceTab::Sql(tab))
-                    if tab.result_view == crate::model::tab::ResultView::Data
-            )
-        }
-    })
+}
+
+fn pagination_context_allows(app: &App, relation: bool) -> bool {
+    if relation {
+        matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Relation(tab))
+                if tab.view == crate::model::relation::RelationView::Data
+                    && tab.query.focus.is_none()
+        )
+    } else {
+        matches!(
+            app.tabs.get(app.active_tab),
+            Some(crate::model::tab::WorkspaceTab::Sql(tab))
+                if tab.result_view == crate::model::tab::ResultView::Data
+        )
+    }
+}
+
+fn pagination_context_active(app: &App) -> bool {
+    app.focus == Focus::Results
+        && (pagination_context_allows(app, false) || pagination_context_allows(app, true))
+}
+
+fn configured_pagination_sequence_action(
+    bindings: &crate::config::KeyBindings,
+    app: &App,
+    events: &[KeyEvent],
+) -> Option<Action> {
+    let relation = app.is_active_relation_tab();
+    if !pagination_context_allows(app, relation) {
+        return None;
+    }
+    pagination_actions(relation)
+        .into_iter()
+        .find_map(|(command, result, relation_action)| {
+            bindings
+                .matches_sequence(command, events)
+                .then_some(if relation { relation_action } else { result })
+        })
 }
 
 fn map_catalog_editor(event: KeyEvent, app: &App) -> Option<Action> {
@@ -2255,6 +2293,7 @@ fn pending_display(pending: Pending) -> Option<(crate::help::ShortcutPrefix, Str
         }
         Pending::Previous => Some((ShortcutPrefix::Previous, "[".into())),
         Pending::Next => Some((ShortcutPrefix::Next, "]".into())),
+        Pending::ResultsBraceOpen | Pending::ResultsBraceClose => None,
         Pending::GridYank => Some((ShortcutPrefix::GridYank, "y".into())),
         Pending::SqlActivityYank => Some((ShortcutPrefix::GridYank, "y".into())),
         Pending::RelationDelete => Some((ShortcutPrefix::RelationDelete, "d".into())),
@@ -2279,6 +2318,11 @@ fn map_pending(
         || (pending == Pending::Goto
             && event.modifiers == KeyModifiers::SHIFT
             && event.code == KeyCode::Char('T'))
+        || (matches!(
+            pending,
+            Pending::ResultsBraceOpen | Pending::ResultsBraceClose
+        ) && event.modifiers == KeyModifiers::SHIFT
+            && matches!(event.code, KeyCode::Char('{' | '}')))
         || matches!(pending, Pending::Window { .. });
     if pending == Pending::Leader {
         let sequence = [KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), event];
@@ -2380,16 +2424,28 @@ fn map_pending(
         (Pending::Previous, code) => {
             let prefix = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
             let event = KeyEvent::new(code, KeyModifiers::NONE);
-            bindings
-                .matches_sequence("previous-tab", &[prefix, event])
-                .then_some(Action::PreviousTab)
+            configured_pagination_sequence_action(bindings, app, &[prefix, event]).or_else(|| {
+                bindings
+                    .matches_sequence("previous-tab", &[prefix, event])
+                    .then_some(Action::PreviousTab)
+            })
         }
         (Pending::Next, code) => {
             let prefix = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
             let event = KeyEvent::new(code, KeyModifiers::NONE);
-            bindings
-                .matches_sequence("next-tab", &[prefix, event])
-                .then_some(Action::NextTab)
+            configured_pagination_sequence_action(bindings, app, &[prefix, event]).or_else(|| {
+                bindings
+                    .matches_sequence("next-tab", &[prefix, event])
+                    .then_some(Action::NextTab)
+            })
+        }
+        (Pending::ResultsBraceOpen, KeyCode::Char('{')) => {
+            let event = KeyEvent::new(KeyCode::Char('{'), KeyModifiers::NONE);
+            configured_pagination_sequence_action(bindings, app, &[event, event])
+        }
+        (Pending::ResultsBraceClose, KeyCode::Char('}')) => {
+            let event = KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE);
+            configured_pagination_sequence_action(bindings, app, &[event, event])
         }
         (Pending::Leader, KeyCode::Char('t')) => None,
         (Pending::RelationDelete, KeyCode::Char('d')) => Some(Action::RelationDeleteCurrent),
@@ -4084,6 +4140,66 @@ mod tests {
             Some(Action::RelationEditConfirm)
         );
         assert!(keymap.pending.is_none());
+    }
+
+    #[test]
+    fn results_pagination_maps_brace_and_bracket_aliases() {
+        let mut app = App::new(Vec::new());
+        let mut tab = ConsoleTab::new("query");
+        tab.result_view = crate::model::tab::ResultView::Data;
+        app.tabs.push(WorkspaceTab::Sql(tab));
+        app.active_tab = 1;
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(key(KeyCode::Char('{')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('{')), &app),
+            Some(Action::ResultFirstPage)
+        );
+
+        keymap.clear_pending();
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT), &app,),
+            None
+        );
+        assert_eq!(
+            keymap.map(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::SHIFT), &app,),
+            Some(Action::ResultLastPage)
+        );
+
+        keymap.clear_pending();
+        assert_eq!(keymap.map(key(KeyCode::Char('[')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('[')), &app),
+            Some(Action::ResultPreviousPage)
+        );
+
+        keymap.clear_pending();
+        assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char(']')), &app),
+            Some(Action::ResultNextPage)
+        );
+    }
+
+    #[test]
+    fn relation_pagination_maps_bracket_aliases() {
+        let mut app = relation_app(RelationGridMode::Browse);
+        app.focus = Focus::Results;
+        let mut keymap = Keymap::default();
+
+        assert_eq!(keymap.map(key(KeyCode::Char('[')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char('[')), &app),
+            Some(Action::RelationPreviousPage)
+        );
+        keymap.clear_pending();
+        assert_eq!(keymap.map(key(KeyCode::Char(']')), &app), None);
+        assert_eq!(
+            keymap.map(key(KeyCode::Char(']')), &app),
+            Some(Action::RelationNextPage)
+        );
     }
 
     #[test]
